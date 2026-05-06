@@ -1,0 +1,42 @@
+- name: priority/p0
+  color: b60205
+  description: Critical, immediate attention required.
+- name: priority/p1
+  color: d93f0b
+  description: High priority.
+- name: priority/p2
+  color: fbca04
+  description: Medium priority.
+- name: priority/p3
+  color: 0e8a16
+  description: Low priority.
+- name: type/bug
+  color: d73a4a
+  description: Something is not working.
+- name: type/feature
+  color: a2eeef
+  description: New feature or enhancement.
+- name: type/chore
+  color: cfd3d7
+  description: Maintenance or cleanup.
+- name: area/routing
+  color: 1d76db
+  description: Host matching and proxy routing.
+- name: area/tls-acme
+  color: 5319e7
+  description: TLS, ask endpoint, ACME, and certificate cache.
+- name: area/config
+  color: 006b75
+  description: Gatewayfile and reload behavior.
+- name: area/docker
+  color: 0b7285
+  description: Docker image and compose setup.
+- name: area/observability
+  color: 0052cc
+  description: Logs, health, metrics, and runbooks.
+- name: area/ci
+  color: 6f42c1
+  description: CI, release, and repository automation.
+- name: status/blocked
+  color: bfdadc
+  description: Blocked by external dependency or decision.

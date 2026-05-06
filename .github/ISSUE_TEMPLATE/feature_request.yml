@@ -1,0 +1,36 @@
+name: Feature request
+description: Propose a gateway feature or operational improvement.
+title: "[Feature]: "
+labels:
+  - type/feature
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operator problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the smallest useful implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - priority/p0
+        - priority/p1
+        - priority/p2
+        - priority/p3
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: How should this be tested or observed in production?

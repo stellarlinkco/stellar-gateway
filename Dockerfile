@@ -11,11 +11,16 @@ RUN cargo build --release --locked
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && apt-get install -y --no-install-recommends ca-certificates curl libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=builder /app/target/release/stellar-gateway /usr/local/bin/stellar-gateway
 COPY tests/fixtures/pebble.minica.pem /app/tests/fixtures/pebble.minica.pem
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD curl --fail --silent --show-error http://127.0.0.1:8080/health \
+    || curl --fail --silent --show-error http://127.0.0.1:80/health \
+    || exit 1
 
 ENTRYPOINT ["stellar-gateway"]

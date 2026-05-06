@@ -157,8 +157,12 @@ fn wait_for_listen(port: u16) {
 }
 
 fn http_get(port: u16, host_header: &str) -> (u16, Vec<u8>) {
+    http_get_path(port, host_header, "/")
+}
+
+fn http_get_path(port: u16, host_header: &str, path: &str) -> (u16, Vec<u8>) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect gateway");
-    let req = format!("GET / HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n");
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).expect("write request");
 
     let mut resp = Vec::new();
@@ -238,4 +242,34 @@ fn gateway_should_reject_and_not_call_upstream_when_host_does_not_match() {
     let upstream_count = env.upstream_count.load(Ordering::SeqCst);
 
     assert_eq!((status, upstream_count), (404, 0));
+}
+
+#[test]
+fn gateway_should_serve_health_without_wildcard_host_match() {
+    let env = TestEnv::new();
+    let (status, resp) = http_get_path(env.gateway_port, "example.com", "/health");
+    let upstream_count = env.upstream_count.load(Ordering::SeqCst);
+
+    assert!(
+        status == 200 && resp.ends_with(b"ok\n") && upstream_count == 0,
+        "status={status}; upstream_count={upstream_count}; resp={}",
+        String::from_utf8_lossy(&resp)
+    );
+}
+
+#[test]
+fn gateway_should_serve_prometheus_metrics_without_wildcard_host_match() {
+    let env = TestEnv::new();
+    let _ = http_get(env.gateway_port, "foo.page.hdd.ink");
+    let (status, resp) = http_get_path(env.gateway_port, "example.com", "/metrics");
+    let upstream_count = env.upstream_count.load(Ordering::SeqCst);
+    let body = String::from_utf8_lossy(&resp);
+
+    assert!(
+        status == 200
+            && body.contains("# TYPE stellar_gateway_requests_total counter")
+            && body.contains("stellar_gateway_route_matches_total 1")
+            && upstream_count == 1,
+        "status={status}; upstream_count={upstream_count}; body={body}"
+    );
 }

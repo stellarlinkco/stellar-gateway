@@ -10,6 +10,7 @@ use crate::acme_issuer::{AcmeIssuer, InstantAcmeIssuer};
 use crate::cert_cache::{CertificateCache, CertificateMaterial};
 use crate::config::GatewayConfig;
 use crate::error::{GatewayError, Result};
+use crate::metrics::METRICS;
 use crate::routing::{is_wildcard_host_match, normalize_host};
 use crate::tls::{AskClient, AskDecision};
 
@@ -155,8 +156,19 @@ impl GatewayRuntimeState {
             );
             return Ok(());
         }
-        self.reload_config()?;
-        self.reload_certificates(now)
+        match self
+            .reload_config()
+            .and_then(|_| self.reload_certificates(now))
+        {
+            Ok(()) => {
+                METRICS.record_reload_success();
+                Ok(())
+            }
+            Err(err) => {
+                METRICS.record_reload_failure();
+                Err(err)
+            }
+        }
     }
 
     pub async fn certificate_for_sni(&self, sni: &str) -> Option<CertificateMaterial> {
@@ -233,6 +245,7 @@ impl GatewayRuntimeState {
             return None;
         }
 
+        METRICS.record_cert_issuance_attempt();
         let entry = match self
             .issuer
             .issue_certificate(&config, &hostname, &self.http01_store)
@@ -240,6 +253,7 @@ impl GatewayRuntimeState {
         {
             Ok(entry) => entry,
             Err(err) => {
+                METRICS.record_cert_issuance_failure();
                 tracing::warn!(
                     event = "tls_acme_issuance",
                     hostname = %hostname,
@@ -252,6 +266,7 @@ impl GatewayRuntimeState {
         };
 
         if let Err(err) = self.store_certificate(entry.clone()) {
+            METRICS.record_cert_issuance_failure();
             tracing::warn!(
                 event = "tls_acme_issuance",
                 hostname = %hostname,
@@ -268,6 +283,7 @@ impl GatewayRuntimeState {
             decision = "issued",
             "tls_acme_issuance"
         );
+        METRICS.record_cert_issuance_success();
         Some(entry.material().clone())
     }
 

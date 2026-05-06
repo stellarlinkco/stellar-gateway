@@ -1,0 +1,39 @@
+name: Bug report
+description: Report a reproducible gateway bug.
+title: "[Bug]: "
+labels:
+  - type/bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include Gatewayfile snippets, curl commands, and logs when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - area/routing
+        - area/tls-acme
+        - area/config
+        - area/docker
+        - area/observability
+        - area/ci
+    validations:
+      required: true

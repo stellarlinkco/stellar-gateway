@@ -9,6 +9,7 @@ use pingora::prelude::{HttpPeer, ProxyHttp, Session};
 
 use crate::acme::{Http01ChallengeStore, Http01Decision, Http01Request, Http01RequestPolicy};
 use crate::config::GatewayConfig;
+use crate::metrics::METRICS;
 use crate::reload::GatewayRuntimeState;
 use crate::routing::{RouteMatch, is_wildcard_host_match, normalize_host};
 
@@ -93,6 +94,20 @@ impl GatewayProxy {
         is_wildcard_host_match(host, &config.routes.wildcard.suffix)
             .then_some(config.routes.wildcard.upstream.addr)
     }
+
+    async fn respond_text(
+        session: &mut Session,
+        status: StatusCode,
+        content_type: &str,
+        body: impl Into<Bytes>,
+    ) -> pingora::Result<()> {
+        let bytes = body.into();
+        let mut resp = ResponseHeader::build(status, Some(bytes.len()))?;
+        resp.insert_header(header::CONTENT_TYPE, content_type)?;
+        resp.insert_header(header::CACHE_CONTROL, "no-store")?;
+        session.write_response_header(Box::new(resp), false).await?;
+        session.write_response_body(Some(bytes), true).await
+    }
 }
 
 #[async_trait]
@@ -111,11 +126,30 @@ impl ProxyHttp for GatewayProxy {
         let req = session.req_header();
         let path = req.uri.path();
         ctx.path = RequestCtx::path_for_log(path);
+        METRICS.record_request();
         ctx.request_id = req
             .headers
             .get("x-request-id")
             .and_then(|h| h.to_str().ok())
             .map(|s| s.to_owned());
+
+        match path {
+            "/health" => {
+                Self::respond_text(session, StatusCode::OK, "text/plain", "ok\n").await?;
+                return Ok(true);
+            }
+            "/metrics" => {
+                Self::respond_text(
+                    session,
+                    StatusCode::OK,
+                    "text/plain; version=0.0.4; charset=utf-8",
+                    METRICS.render_prometheus(),
+                )
+                .await?;
+                return Ok(true);
+            }
+            _ => {}
+        }
 
         let host = req
             .headers
@@ -161,12 +195,8 @@ impl ProxyHttp for GatewayProxy {
             match policy.authorize(Http01Request::new(path, host), route_match) {
                 Http01Decision::RespondWithBody(body) => {
                     ctx.http01_responded = true;
-                    let bytes = Bytes::from(body);
-                    let mut resp = ResponseHeader::build(StatusCode::OK, Some(bytes.len()))?;
-                    resp.insert_header(header::CONTENT_TYPE, "text/plain")?;
-                    resp.insert_header(header::CACHE_CONTROL, "no-store")?;
-                    session.write_response_header(Box::new(resp), false).await?;
-                    session.write_response_body(Some(bytes), true).await?;
+                    METRICS.record_http01_response();
+                    Self::respond_text(session, StatusCode::OK, "text/plain", body).await?;
                     tracing::info!(
                         event = "acme_http01",
                         host = %log_host,
@@ -182,6 +212,7 @@ impl ProxyHttp for GatewayProxy {
 
         match route_match {
             RouteMatch::Matched => {
+                METRICS.record_route_match();
                 ctx.upstream = Some(config.routes.wildcard.upstream.addr.clone());
                 tracing::info!(
                     event = "routing",
@@ -194,6 +225,7 @@ impl ProxyHttp for GatewayProxy {
                 Ok(false)
             }
             RouteMatch::NoMatch => {
+                METRICS.record_route_rejection();
                 tracing::info!(
                     event = "routing",
                     host = %log_host,
@@ -238,6 +270,9 @@ impl ProxyHttp for GatewayProxy {
             .response_written()
             .map(|h| h.status.as_u16())
             .unwrap_or(0);
+        if e.is_some() {
+            METRICS.record_upstream_error();
+        }
         let latency_ms = ctx.started_at.elapsed().as_millis();
         let host = ctx.host.as_deref().unwrap_or("<unknown>");
 

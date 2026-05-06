@@ -2,9 +2,13 @@ target/
 cert-cache/
 .acceptance/
 .agents/
+.idea/
+.vscode/
 .DS_Store
 .env
 .env.*
 *.pem
 *.key
 *.crt
+lcov.info
+coverage/

@@ -71,6 +71,13 @@ Send a matching request:
 curl -v 127.0.0.1:8080/ -H 'Host: demo.page.hdd.ink'
 ```
 
+Check health and metrics:
+
+```bash
+curl -v 127.0.0.1:8080/health
+curl -v 127.0.0.1:8080/metrics
+```
+
 Non-matching hosts are rejected:
 
 ```bash
@@ -178,6 +185,10 @@ docker pull ghcr.io/stellarlinkco/stellar-gateway:sha-<commit>
 
 Git tags such as `v0.1.0` are also published as matching image tags.
 
+## Operations
+
+See `docs/runbooks/operations.md` for deploy, health verification, reload, rollback, ACME troubleshooting, and metrics guidance.
+
 ## Validation
 
 Run the quality gate:
@@ -187,5 +198,6 @@ cargo fmt --check
 cargo clippy --all-targets --all-features
 cargo test
 python3 tests/acceptance/docker_compose_acceptance.py
+bash scripts/readiness-check.sh
 ```
 

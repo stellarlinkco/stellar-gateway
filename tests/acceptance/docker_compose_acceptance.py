@@ -125,6 +125,22 @@ def assert_non_matching_host_rejected():
         raise AssertionError(f"expected 404 for non-matching host, got {result.stdout!r}")
 
 
+def assert_health_and_metrics():
+    deadline = time.time() + 60
+    last = ""
+    while time.time() < deadline:
+        try:
+            health = curl(["http://127.0.0.1:18080/health"])
+            metrics = curl(["http://127.0.0.1:18080/metrics"])
+            if health == "ok\n" and "stellar_gateway_requests_total" in metrics:
+                return
+            last = f"health={health!r}; metrics={metrics!r}"
+        except subprocess.CalledProcessError as err:
+            last = err.stdout or str(err)
+        time.sleep(1)
+    raise AssertionError(f"health/metrics did not pass; last={last!r}")
+
+
 def main():
     if (ROOT / ".acceptance").exists():
         shutil.rmtree(ROOT / ".acceptance")
@@ -132,6 +148,7 @@ def main():
 
     try:
         run([*COMPOSE, "up", "-d", "--build"])
+        assert_health_and_metrics()
         wait_for_http("upstream-one")
         assert_non_matching_host_rejected()
         assert_https_issues_and_proxies()
