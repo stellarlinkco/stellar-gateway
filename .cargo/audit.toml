@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+  # Transitive via pingora-core -> prometheus. No fixed Pingora release is available yet,
+  # and stellar-gateway does not parse untrusted protobuf payloads directly.
+  "RUSTSEC-2024-0437",
+]

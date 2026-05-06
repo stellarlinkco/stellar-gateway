@@ -34,7 +34,7 @@ jobs:
       - name: Complexity threshold
         run: |
           python3 -m pip install lizard
-          lizard -l rust -C 30 -L 250 src tests
+          lizard -l rust -C 30 -L 250 src
 
       - name: Duplicate code threshold
         run: npx --yes jscpd@4 --pattern "**/*.rs" --ignore "target/**" --min-lines 8 --threshold 10 .

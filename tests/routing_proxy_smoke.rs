@@ -77,11 +77,19 @@ fn start_upstream() -> (
 }
 
 fn gateway_bin_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let bin_path = manifest_dir
-        .join("target")
-        .join("debug")
-        .join("stellar-gateway");
+    let bin_path = option_env!("CARGO_BIN_EXE_stellar-gateway")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let current_exe = std::env::current_exe().ok()?;
+            let debug_dir = current_exe.parent()?.parent()?;
+            Some(debug_dir.join("stellar-gateway"))
+        })
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("target")
+                .join("debug")
+                .join("stellar-gateway")
+        });
     assert!(
         bin_path.exists(),
         "expected gateway binary at {} (run with `cargo test --all-targets`)",
