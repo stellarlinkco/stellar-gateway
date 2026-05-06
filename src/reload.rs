@@ -1,17 +1,25 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
+use crate::acme::Http01ChallengeStore;
+use crate::acme_issuer::{AcmeIssuer, InstantAcmeIssuer};
 use crate::cert_cache::{CertificateCache, CertificateMaterial};
 use crate::config::GatewayConfig;
-use crate::error::Result;
+use crate::error::{GatewayError, Result};
+use crate::routing::{is_wildcard_host_match, normalize_host};
+use crate::tls::{AskClient, AskDecision};
 
-#[derive(Debug)]
 pub struct GatewayRuntimeState {
     gatewayfile_path: PathBuf,
     config: RwLock<GatewayConfig>,
     cert_cache: RwLock<CertificateCache>,
+    http01_store: Http01ChallengeStore,
+    issuer: Arc<dyn AcmeIssuer>,
+    issuance_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     config_version: AtomicU64,
     cert_cache_version: AtomicU64,
 }
@@ -22,12 +30,24 @@ impl GatewayRuntimeState {
         gatewayfile_path: impl AsRef<Path>,
         now: SystemTime,
     ) -> Result<Self> {
+        Self::new_with_issuer(config, gatewayfile_path, now, Arc::new(InstantAcmeIssuer))
+    }
+
+    pub fn new_with_issuer(
+        config: GatewayConfig,
+        gatewayfile_path: impl AsRef<Path>,
+        now: SystemTime,
+        issuer: Arc<dyn AcmeIssuer>,
+    ) -> Result<Self> {
         let gatewayfile_path = gatewayfile_path.as_ref().to_path_buf();
         let cert_cache = CertificateCache::load(&config.cert_cache.dir, now)?;
         Ok(Self {
             gatewayfile_path,
             config: RwLock::new(config),
             cert_cache: RwLock::new(cert_cache),
+            http01_store: Http01ChallengeStore::default(),
+            issuer,
+            issuance_locks: std::sync::Mutex::new(HashMap::new()),
             config_version: AtomicU64::new(1),
             cert_cache_version: AtomicU64::new(1),
         })
@@ -119,5 +139,156 @@ impl GatewayRuntimeState {
             Err(poisoned) => poisoned.into_inner(),
         };
         guard.lookup(hostname).map(|e| e.material().clone())
+    }
+
+    pub fn http01_store(&self) -> Http01ChallengeStore {
+        self.http01_store.clone()
+    }
+
+    pub fn reload_if_enabled(&self, now: SystemTime) -> Result<()> {
+        if !self.config().reload.enabled {
+            tracing::info!(
+                event = "reload",
+                decision = "ignored",
+                reason = "reload_disabled",
+                "reload trigger ignored"
+            );
+            return Ok(());
+        }
+        self.reload_config()?;
+        self.reload_certificates(now)
+    }
+
+    pub async fn certificate_for_sni(&self, sni: &str) -> Option<CertificateMaterial> {
+        if let Some(material) = self.certificate_for(sni) {
+            tracing::info!(
+                event = "tls_certificate_select",
+                hostname = %sni,
+                source = "cache",
+                "tls_certificate_select"
+            );
+            return Some(material);
+        }
+
+        let hostname = match normalize_host(sni) {
+            Some(hostname) => hostname,
+            None => {
+                tracing::warn!(
+                    event = "tls_issuance_policy",
+                    hostname = %sni,
+                    decision = "deny",
+                    reason_class = "invalid_hostname",
+                    "tls_issuance_policy"
+                );
+                return None;
+            }
+        };
+
+        let lock = {
+            let mut guard = match self.issuance_locks.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard
+                .entry(hostname.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = lock.lock().await;
+
+        if let Some(material) = self.certificate_for(&hostname) {
+            return Some(material);
+        }
+
+        let config = self.config();
+        if !is_wildcard_host_match(&hostname, &config.routes.wildcard.suffix) {
+            tracing::warn!(
+                event = "tls_issuance_policy",
+                hostname = %hostname,
+                decision = "deny",
+                reason_class = "wildcard_mismatch",
+                "tls_issuance_policy"
+            );
+            return None;
+        }
+
+        let client = match AskClient::try_new(
+            config.tls.ask_url.clone(),
+            std::time::Duration::from_secs(2),
+        ) {
+            Ok(client) => client,
+            Err(err) => {
+                tracing::warn!(
+                    event = "tls_issuance_policy",
+                    hostname = %hostname,
+                    decision = "deny",
+                    reason_class = "ask_client_error",
+                    error = %err,
+                    "tls_issuance_policy"
+                );
+                return None;
+            }
+        };
+        if !matches!(client.authorize(&hostname), AskDecision::Allow) {
+            return None;
+        }
+
+        let entry = match self
+            .issuer
+            .issue_certificate(&config, &hostname, &self.http01_store)
+            .await
+        {
+            Ok(entry) => entry,
+            Err(err) => {
+                tracing::warn!(
+                    event = "tls_acme_issuance",
+                    hostname = %hostname,
+                    decision = "error",
+                    error = %err,
+                    "tls_acme_issuance"
+                );
+                return None;
+            }
+        };
+
+        if let Err(err) = self.store_certificate(entry.clone()) {
+            tracing::warn!(
+                event = "tls_acme_issuance",
+                hostname = %hostname,
+                decision = "cache_store_error",
+                error = %err,
+                "tls_acme_issuance"
+            );
+            return None;
+        }
+
+        tracing::info!(
+            event = "tls_acme_issuance",
+            hostname = %hostname,
+            decision = "issued",
+            "tls_acme_issuance"
+        );
+        Some(entry.material().clone())
+    }
+
+    fn store_certificate(&self, entry: crate::cert_cache::CertificateCacheEntry) -> Result<()> {
+        let config = self.config();
+        CertificateCache::new(&config.cert_cache.dir).store(&entry)?;
+        let loaded = CertificateCache::load(&config.cert_cache.dir, SystemTime::now())?;
+        {
+            let mut guard = match self.cert_cache.write() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *guard = loaded;
+        }
+        let _ = self.cert_cache_version.fetch_add(1, Ordering::Relaxed);
+        if self.certificate_for(entry.hostname()).is_none() {
+            return Err(GatewayError::CertificateCache(format!(
+                "stored certificate for `{}` did not validate after reload",
+                entry.hostname()
+            )));
+        }
+        Ok(())
     }
 }

@@ -72,6 +72,8 @@ pub struct AcmeConfig {
     pub directory_url: Url,
     pub email: String,
     pub http_01: bool,
+    #[serde(default)]
+    pub ca_cert_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

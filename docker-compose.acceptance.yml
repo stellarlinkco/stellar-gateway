@@ -1,0 +1,75 @@
+services:
+  gateway:
+    build:
+      context: .
+    command: ["--gatewayfile", "/app/Gatewayfile"]
+    environment:
+      RUST_LOG: info
+    ports:
+      - "18080:8080"
+      - "18443:8443"
+    volumes:
+      - ./.acceptance/Gatewayfile:/app/Gatewayfile:ro
+      - ./.acceptance/cert-cache:/cache
+    depends_on:
+      - ask
+      - upstream
+      - upstream2
+      - pebble
+
+  upstream:
+    image: python:3.14-alpine
+    command:
+      - python
+      - -c
+      - |
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body=b"upstream-one"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *args): pass
+        HTTPServer(("0.0.0.0", 3000), H).serve_forever()
+
+  upstream2:
+    image: python:3.14-alpine
+    command:
+      - python
+      - -c
+      - |
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body=b"upstream-two"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *args): pass
+        HTTPServer(("0.0.0.0", 3001), H).serve_forever()
+
+  ask:
+    image: python:3.14-alpine
+    command:
+      - python
+      - -c
+      - |
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body=b"allow"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *args): pass
+        HTTPServer(("0.0.0.0", 9000), H).serve_forever()
+
+  pebble:
+    image: ldez/pebble:latest
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_VA_ALWAYS_VALID: "1"

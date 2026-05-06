@@ -77,9 +77,10 @@ impl GatewayProxy {
     }
 
     pub fn from_runtime_state(runtime_state: Arc<GatewayRuntimeState>) -> Self {
+        let http01_store = runtime_state.http01_store();
         Self {
             config: GatewayProxyConfig::Runtime(runtime_state),
-            http01_store: Http01ChallengeStore::default(),
+            http01_store,
         }
     }
 

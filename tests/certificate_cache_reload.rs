@@ -43,6 +43,17 @@ logging:
     )
 }
 
+fn valid_gatewayfile_with_reload(
+    cache_dir: &std::path::Path,
+    suffix: &str,
+    reload_enabled: bool,
+) -> String {
+    valid_gatewayfile(cache_dir, suffix).replace(
+        "reload:\n  enabled: true",
+        &format!("reload:\n  enabled: {reload_enabled}"),
+    )
+}
+
 fn valid_entry_with_expiry(hostname: &str, expires_at: SystemTime) -> CertificateCacheEntry {
     let certificate = rcgen::generate_simple_self_signed(vec![hostname.to_string()]).unwrap();
     CertificateCacheEntry::new(
@@ -57,6 +68,19 @@ fn valid_entry_with_expiry(hostname: &str, expires_at: SystemTime) -> Certificat
 
 fn valid_entry(hostname: &str) -> CertificateCacheEntry {
     valid_entry_with_expiry(hostname, SystemTime::now() + Duration::from_secs(3600))
+}
+
+fn entry_with_certificate_name(hostname: &str, certificate_name: &str) -> CertificateCacheEntry {
+    let certificate =
+        rcgen::generate_simple_self_signed(vec![certificate_name.to_string()]).unwrap();
+    CertificateCacheEntry::new(
+        hostname,
+        CertificateMaterial::new(
+            certificate.cert.pem(),
+            certificate.signing_key.serialize_pem(),
+        ),
+        SystemTime::now() + Duration::from_secs(3600),
+    )
 }
 
 #[test]
@@ -126,6 +150,60 @@ fn certificate_cache_should_reuse_valid_entry_after_state_recreation() {
     let entry = recreated.lookup("demo.page.hdd.ink");
 
     assert!(entry.is_some());
+}
+
+#[test]
+fn certificate_cache_should_reject_entry_when_certificate_does_not_cover_hostname() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = CertificateCache::new(dir.path());
+    cache
+        .store(&entry_with_certificate_name(
+            "demo.page.hdd.ink",
+            "other.page.hdd.ink",
+        ))
+        .unwrap();
+
+    let loaded = CertificateCache::load(dir.path(), SystemTime::now()).unwrap();
+
+    assert!(
+        loaded.lookup("demo.page.hdd.ink").is_none()
+            && loaded
+                .rejections()
+                .iter()
+                .any(|record| record.class == CacheEntryRejection::HostnameMismatch)
+    );
+}
+
+#[test]
+fn certificate_cache_should_accept_wildcard_certificate_for_single_label_hostname() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = CertificateCache::new(dir.path());
+    cache
+        .store(&entry_with_certificate_name(
+            "demo.page.hdd.ink",
+            "*.page.hdd.ink",
+        ))
+        .unwrap();
+
+    let loaded = CertificateCache::load(dir.path(), SystemTime::now()).unwrap();
+
+    assert!(loaded.lookup("demo.page.hdd.ink").is_some());
+}
+
+#[test]
+fn certificate_cache_should_reject_wildcard_certificate_for_nested_hostname() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = CertificateCache::new(dir.path());
+    cache
+        .store(&entry_with_certificate_name(
+            "a.b.page.hdd.ink",
+            "*.page.hdd.ink",
+        ))
+        .unwrap();
+
+    let loaded = CertificateCache::load(dir.path(), SystemTime::now()).unwrap();
+
+    assert!(loaded.lookup("a.b.page.hdd.ink").is_none());
 }
 
 #[test]
@@ -205,4 +283,26 @@ fn gateway_runtime_state_should_refresh_certificate_cache_without_restarting() {
     state.reload_certificates(SystemTime::now()).unwrap();
 
     assert!(state.certificate_for("demo.page.hdd.ink").is_some());
+}
+
+#[test]
+fn gateway_runtime_state_should_ignore_reload_trigger_when_reload_is_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let gatewayfile = dir.path().join("Gatewayfile");
+    std::fs::write(
+        &gatewayfile,
+        valid_gatewayfile_with_reload(dir.path(), "page.hdd.ink", false),
+    )
+    .unwrap();
+    let config = GatewayConfig::load_from_path(&gatewayfile).unwrap();
+    let state = GatewayRuntimeState::new(config, &gatewayfile, SystemTime::now()).unwrap();
+    std::fs::write(
+        &gatewayfile,
+        valid_gatewayfile_with_reload(dir.path(), "other.hdd.ink", false),
+    )
+    .unwrap();
+
+    state.reload_if_enabled(SystemTime::now()).unwrap();
+
+    assert_eq!(state.config().routes.wildcard.suffix, "page.hdd.ink");
 }

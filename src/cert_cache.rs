@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use openssl::nid::Nid;
 use openssl::pkey::{PKey, Private};
 use openssl::x509::X509;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GatewayError, Result};
+use crate::routing::normalize_host;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CertificateMaterial {
@@ -230,6 +232,12 @@ impl CertificateCache {
                 continue;
             }
 
+            if !certificate_covers_hostname(loaded.material().certificate_pem(), loaded.hostname())
+            {
+                self.record_rejection(CacheEntryRejection::HostnameMismatch, path);
+                continue;
+            }
+
             let hostname = loaded.hostname().to_owned();
             self.entries.insert(hostname.clone(), loaded);
             tracing::info!(
@@ -334,4 +342,50 @@ fn validate_certificate_key_pair(
     } else {
         Err(CacheEntryRejection::Malformed)
     }
+}
+
+fn certificate_covers_hostname(certificate_pem: &str, hostname: &str) -> bool {
+    let Ok(certificate) = X509::from_pem(certificate_pem.as_bytes()) else {
+        return false;
+    };
+    let Some(hostname) = normalize_host(hostname) else {
+        return false;
+    };
+
+    if let Some(subject_alt_names) = certificate.subject_alt_names() {
+        let mut saw_dns_name = false;
+        for name in subject_alt_names {
+            let Some(dns_name) = name.dnsname() else {
+                continue;
+            };
+            saw_dns_name = true;
+            if dns_pattern_matches_hostname(dns_name, &hostname) {
+                return true;
+            }
+        }
+        if saw_dns_name {
+            return false;
+        }
+    }
+
+    certificate
+        .subject_name()
+        .entries_by_nid(Nid::COMMONNAME)
+        .filter_map(|entry| entry.data().as_utf8().ok())
+        .any(|common_name| dns_pattern_matches_hostname(common_name.as_ref(), &hostname))
+}
+
+fn dns_pattern_matches_hostname(pattern: &str, hostname: &str) -> bool {
+    let Some(pattern) = normalize_host(pattern) else {
+        return false;
+    };
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        let Some(prefix) = hostname.strip_suffix(suffix) else {
+            return false;
+        };
+        return prefix.ends_with('.')
+            && !prefix[..prefix.len().saturating_sub(1)].contains('.')
+            && prefix.len() > 1;
+    }
+    pattern == hostname
 }

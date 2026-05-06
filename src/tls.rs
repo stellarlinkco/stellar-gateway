@@ -15,7 +15,6 @@ use pingora::tls::ssl::NameType;
 use thiserror::Error;
 use url::Url;
 
-use crate::cert_cache::CertificateMaterial;
 use crate::reload::GatewayRuntimeState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,30 +62,15 @@ pub enum AskClientBuildError {
 
 pub struct GatewayTlsAccept {
     runtime_state: Arc<GatewayRuntimeState>,
-    fallback_material: CertificateMaterial,
 }
 
 impl GatewayTlsAccept {
-    pub fn new(
-        runtime_state: Arc<GatewayRuntimeState>,
-        fallback_material: CertificateMaterial,
-    ) -> Self {
-        Self {
-            runtime_state,
-            fallback_material,
-        }
+    pub fn new(runtime_state: Arc<GatewayRuntimeState>) -> Self {
+        Self { runtime_state }
     }
 
-    fn material_for_sni(&self, sni: &str) -> Option<CertificateMaterial> {
+    fn cached_material_for_sni(&self, sni: &str) -> Option<crate::cert_cache::CertificateMaterial> {
         self.runtime_state.certificate_for(sni)
-    }
-
-    fn should_use_fallback_for_sni(&self, sni: &str) -> bool {
-        let config = self.runtime_state.config();
-        let Ok(client) = AskClient::try_new(config.tls.ask_url, Duration::from_secs(2)) else {
-            return false;
-        };
-        client.authorize(sni).is_allow()
     }
 }
 
@@ -96,12 +80,12 @@ impl TlsAccept for GatewayTlsAccept {
         let Some(sni) = ssl.servername(NameType::HOST_NAME).map(ToOwned::to_owned) else {
             return;
         };
-        let (material, source) = match self.material_for_sni(&sni) {
+        let (material, source) = match self.cached_material_for_sni(&sni) {
             Some(material) => (material, "cache"),
-            None if self.should_use_fallback_for_sni(&sni) => {
-                (self.fallback_material.clone(), "fallback")
-            }
-            None => return,
+            None => match self.runtime_state.certificate_for_sni(&sni).await {
+                Some(material) => (material, "issued"),
+                None => return,
+            },
         };
         let certificate = match X509::from_pem(material.certificate_pem().as_bytes()) {
             Ok(certificate) => certificate,
@@ -131,11 +115,8 @@ impl TlsAccept for GatewayTlsAccept {
     }
 }
 
-pub fn tls_accept_callbacks(
-    runtime_state: Arc<GatewayRuntimeState>,
-    fallback_material: CertificateMaterial,
-) -> TlsAcceptCallbacks {
-    Box::new(GatewayTlsAccept::new(runtime_state, fallback_material))
+pub fn tls_accept_callbacks(runtime_state: Arc<GatewayRuntimeState>) -> TlsAcceptCallbacks {
+    Box::new(GatewayTlsAccept::new(runtime_state))
 }
 
 impl AskClient {

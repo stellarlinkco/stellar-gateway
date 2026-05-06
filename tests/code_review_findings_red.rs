@@ -216,26 +216,6 @@ fn https_verified_handshake_result(
     Ok(stream.ssl().verify_result())
 }
 
-fn https_get_response(port: u16, server_name: &str) -> std::io::Result<String> {
-    let stream = TcpStream::connect(("127.0.0.1", port))?;
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-
-    let mut builder = SslConnector::builder(SslMethod::tls()).expect("TLS connector builder");
-    builder.set_verify(SslVerifyMode::NONE);
-    let connector = builder.build();
-    let mut stream = connector
-        .connect(server_name, stream)
-        .map_err(std::io::Error::other)?;
-    stream.write_all(
-        format!("GET / HTTP/1.1\r\nHost: {server_name}\r\nConnection: close\r\n\r\n").as_bytes(),
-    )?;
-
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-    Ok(response)
-}
-
 struct BodyUpstream {
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -341,12 +321,12 @@ fn cache_certificate_for_host(cache_dir: &Path, hostname: &str, common_name: &st
 }
 
 #[test]
-fn review_gateway_runtime_should_serve_fallback_certificate_for_arbitrary_tenant() {
+fn review_gateway_runtime_should_reject_non_wildcard_sni_without_calling_ask() {
     let temp = TempDir::new().expect("tempdir");
     let http_port = pick_unused_port();
     let https_port = pick_unused_port();
     let upstream = BodyUpstream::start("upstream-ok");
-    let ask_port = start_ask_status_server("HTTP/1.1 200 OK");
+    let (ask_port, ask_called) = start_recording_ask_status_server("HTTP/1.1 200 OK");
     let gatewayfile = write_gatewayfile_with_ask_url(
         &temp,
         http_port,
@@ -355,17 +335,14 @@ fn review_gateway_runtime_should_serve_fallback_certificate_for_arbitrary_tenant
         &format!("http://127.0.0.1:{ask_port}/ask"),
     );
     let _gateway = spawn_gateway(&gatewayfile);
-    let server_name = "random-tenant.page.hdd.ink";
+    let server_name = "attacker.example.com";
     assert!(wait_for_connect(http_port, Duration::from_secs(3)));
 
-    let response =
-        https_get_response(https_port, server_name).expect("HTTPS request should complete");
-    let (dns_names, _common_names) = https_get_peer_certificate_names(https_port, server_name)
-        .expect("HTTPS certificate should be available");
+    let result = https_verified_handshake_result(https_port, server_name);
 
     assert!(
-        response.contains("upstream-ok") && dns_names.contains(&"*.page.hdd.ink".to_owned()),
-        "expected HTTPS proxy response and wildcard fallback SAN for arbitrary tenant; response={response:?}; dns_names={dns_names:?}"
+        result.is_err() && !ask_called.load(Ordering::SeqCst),
+        "expected non-wildcard SNI to fail before ask; result={result:?}"
     );
 }
 
@@ -377,11 +354,7 @@ fn review_gateway_runtime_should_select_cached_certificate_by_sni() {
     let upstream = BodyUpstream::start("upstream-ok");
     let gatewayfile = write_gatewayfile(&temp, http_port, https_port, upstream.addr);
     let cache_dir = temp.path().join("cert-cache");
-    cache_certificate_for_host(
-        &cache_dir,
-        "cached.page.hdd.ink",
-        "cached-cert-marker.page.hdd.ink",
-    );
+    cache_certificate_for_host(&cache_dir, "cached.page.hdd.ink", "cached.page.hdd.ink");
     let _gateway = spawn_gateway(&gatewayfile);
     assert!(wait_for_connect(http_port, Duration::from_secs(3)));
 
@@ -390,8 +363,8 @@ fn review_gateway_runtime_should_select_cached_certificate_by_sni() {
             .expect("HTTPS certificate should be available");
 
     assert!(
-        dns_names.contains(&"cached-cert-marker.page.hdd.ink".to_owned())
-            || common_names.contains(&"cached-cert-marker.page.hdd.ink".to_owned()),
+        dns_names.contains(&"cached.page.hdd.ink".to_owned())
+            || common_names.contains(&"cached.page.hdd.ink".to_owned()),
         "expected SNI-selected cached certificate; dns_names={dns_names:?}; common_names={common_names:?}"
     );
 }

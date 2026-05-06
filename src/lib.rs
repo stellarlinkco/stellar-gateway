@@ -1,4 +1,5 @@
 pub mod acme;
+pub mod acme_issuer;
 pub mod cert_cache;
 pub mod config;
 pub mod error;

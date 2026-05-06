@@ -13,6 +13,9 @@ pub enum GatewayError {
     #[error("Certificate cache error: {0}")]
     CertificateCache(String),
 
+    #[error("ACME error: {0}")]
+    Acme(String),
+
     #[error("Reload error: {0}")]
     Reload(String),
 }
