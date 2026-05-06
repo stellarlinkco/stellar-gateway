@@ -1,0 +1,9 @@
+target/
+cert-cache/
+.agents/
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
+*.crt

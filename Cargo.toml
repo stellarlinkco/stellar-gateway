@@ -1,0 +1,33 @@
+[package]
+name = "stellar-gateway"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1.89"
+bytes = "1.11.1"
+clap = { version = "4.6.1", features = ["derive", "env"] }
+http = "1.4.0"
+once_cell = "1.21.4"
+openssl = "0.10.78"
+pingora = { version = "0.8.0", features = ["lb", "openssl"] }
+rcgen = "0.14.7"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_path_to_error = "0.1.20"
+serde_yaml = "0.9.34"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+url = { version = "2.5.8", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints.rust]
+future-incompatible = "warn"
+nonstandard-style = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = 10 }
+redundant_clone = { level = "deny", priority = 9 }
