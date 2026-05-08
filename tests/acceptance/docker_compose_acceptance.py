@@ -87,7 +87,7 @@ def wait_for_http(expected: str, host: str = HOST):
     raise AssertionError(f"HTTP route for {host} did not return {expected!r}; last={last!r}")
 
 
-def assert_https_issues_and_proxies():
+def assert_https_issues_and_proxies(host: str, expected: str):
     deadline = time.time() + 90
     last = ""
     while time.time() < deadline:
@@ -95,17 +95,19 @@ def assert_https_issues_and_proxies():
             out = curl([
                 "-k",
                 "--resolve",
-                f"{HOST}:{HTTPS_PORT}:127.0.0.1",
-                f"https://{HOST}:{HTTPS_PORT}/",
+                f"{host}:{HTTPS_PORT}:127.0.0.1",
+                f"https://{host}:{HTTPS_PORT}/",
             ])
-            if "upstream-one" in out:
+            if expected in out:
                 return
             last = out
         except subprocess.CalledProcessError as err:
             last = err.stdout or str(err)
         time.sleep(2)
     logs = capture([*COMPOSE, "logs", "--no-color", "gateway"], check=False)
-    raise AssertionError(f"HTTPS ACME proxy did not pass; last={last!r}\nlogs:\n{logs}")
+    raise AssertionError(
+        f"HTTPS ACME proxy for {host} did not return {expected!r}; last={last!r}\nlogs:\n{logs}"
+    )
 
 
 def assert_non_matching_host_rejected():
@@ -160,8 +162,11 @@ def main():
         wait_for_http("upstream-one", APEX_HOST)
         wait_for_http("upstream-one", HOST)
         assert_non_matching_host_rejected()
-        assert_https_issues_and_proxies()
+        assert_https_issues_and_proxies(APEX_HOST, "upstream-one")
+        assert_https_issues_and_proxies(HOST, "upstream-one")
+        run([*COMPOSE, "exec", "-T", "gateway", "test", "-f", f"/cache/{APEX_HOST}.yaml"])
         run([*COMPOSE, "exec", "-T", "gateway", "test", "-f", f"/cache/{HOST}.yaml"])
+        run([*COMPOSE, "exec", "-T", "gateway", "test", "-f", "/cache/acme-account.json"])
 
         write_gatewayfile(gatewayfile("upstream2:3001"))
         run([*COMPOSE, "kill", "-s", "HUP", "gateway"])
@@ -174,14 +179,8 @@ def main():
         write_gatewayfile(gatewayfile("upstream2:3001"))
         run([*COMPOSE, "restart", "gateway"])
         wait_for_http("upstream-two")
-        out = curl([
-            "-k",
-            "--resolve",
-            f"{HOST}:{HTTPS_PORT}:127.0.0.1",
-            f"https://{HOST}:{HTTPS_PORT}/",
-        ])
-        if "upstream-two" not in out:
-            raise AssertionError(f"cached HTTPS after restart failed: {out!r}")
+        assert_https_issues_and_proxies(APEX_HOST, "upstream-two")
+        assert_https_issues_and_proxies(HOST, "upstream-two")
     finally:
         if os.environ.get("KEEP_ACCEPTANCE") != "1":
             run([*COMPOSE, "down", "-v"], check=False)

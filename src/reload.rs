@@ -31,7 +31,12 @@ impl GatewayRuntimeState {
         gatewayfile_path: impl AsRef<Path>,
         now: SystemTime,
     ) -> Result<Self> {
-        Self::new_with_issuer(config, gatewayfile_path, now, Arc::new(InstantAcmeIssuer))
+        Self::new_with_issuer(
+            config,
+            gatewayfile_path,
+            now,
+            Arc::new(InstantAcmeIssuer::default()),
+        )
     }
 
     pub fn new_with_issuer(
