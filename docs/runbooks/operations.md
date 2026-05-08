@@ -3,7 +3,7 @@
 ## Deploy with GHCR image
 
 1. Prepare `/etc/stellar-gateway/Gatewayfile`.
-2. Ensure DNS for the wildcard suffix points to the host.
+2. Ensure DNS for both the apex host and wildcard suffix points to the host.
 3. Ensure ports `80` and `443` are reachable by clients and ACME.
 4. Start the container:
 
@@ -23,14 +23,15 @@ docker run -d --name stellar-gateway \
 ```bash
 curl --fail http://127.0.0.1/health
 curl --fail http://127.0.0.1/metrics
-curl -v http://127.0.0.1/ -H 'Host: demo.page.hdd.ink'
+curl -v http://127.0.0.1/ -H 'Host: hdd.ink'
+curl -v http://127.0.0.1/ -H 'Host: zhirang.hdd.ink'
 ```
 
 Expected:
 
 - `/health` returns `200 ok`.
 - `/metrics` returns Prometheus text counters.
-- Matching wildcard hosts proxy to the configured upstream.
+- Matching apex and wildcard hosts proxy to the configured upstream.
 - Non-matching hosts return `404`.
 
 ## Reload configuration
@@ -78,7 +79,7 @@ Useful commands:
 ```bash
 docker logs stellar-gateway
 docker exec stellar-gateway test -w /app/cert-cache
-curl -v http://127.0.0.1/.well-known/acme-challenge/test -H 'Host: demo.page.hdd.ink'
+curl -v http://127.0.0.1/.well-known/acme-challenge/test -H 'Host: zhirang.hdd.ink'
 ```
 
 ## Metrics to watch

@@ -1,10 +1,10 @@
 # StellarGate (`stellar-gateway`)
 
-StellarGate is a Rust reverse proxy gateway built on Cloudflare Pingora. It routes wildcard tenant hosts such as `*.page.hdd.ink` to a configured upstream and can issue HTTPS certificates on demand through ACME HTTP-01.
+StellarGate is a Rust reverse proxy gateway built on Cloudflare Pingora. It routes apex and wildcard tenant hosts such as `hdd.ink` and `*.hdd.ink` to a configured upstream and can issue HTTPS certificates on demand through ACME HTTP-01.
 
 ## What it does
 
-- Proxies matching wildcard hosts to one upstream.
+- Proxies matching apex and wildcard hosts to one upstream.
 - Rejects non-matching hosts before they reach the upstream.
 - Handles ACME HTTP-01 challenges at `/.well-known/acme-challenge/...`.
 - Calls an ask endpoint before issuing a new on-demand certificate.
@@ -13,43 +13,13 @@ StellarGate is a Rust reverse proxy gateway built on Cloudflare Pingora. It rout
 
 ## Gatewayfile example
 
-```yaml
-listeners:
-  http:
-    bind: "0.0.0.0:8080"
-  https:
-    bind: "0.0.0.0:8443"
-
-routes:
-  wildcard:
-    suffix: "page.hdd.ink"
-    upstream:
-      addr: "127.0.0.1:3000"
-      tls: false
-
-tls:
-  ask_url: "http://127.0.0.1:9000/ask"
-
-acme:
-  directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory"
-  email: "admin@example.com"
-  http_01: true
-
-cert_cache:
-  dir: "./cert-cache"
-
-reload:
-  enabled: true
-
-logging:
-  level: "info"
+```caddyfile
+hdd.ink, *.hdd.ink {
+	reverse_proxy 127.0.0.1:3000
+}
 ```
 
-For production Let's Encrypt, change `acme.directory_url` to:
-
-```yaml
-directory_url: "https://acme-v02.api.letsencrypt.org/directory"
-```
+This Caddyfile-compatible subset uses default local listeners `:8080` and `:8443`. Advanced YAML Gatewayfiles remain supported for custom listener, ACME, cache, reload, and logging settings.
 
 ## Local HTTP quickstart
 
@@ -68,7 +38,8 @@ cargo run -- --gatewayfile Gatewayfile
 Send a matching request:
 
 ```bash
-curl -v 127.0.0.1:8080/ -H 'Host: demo.page.hdd.ink'
+curl -v 127.0.0.1:8080/ -H 'Host: hdd.ink'
+curl -v 127.0.0.1:8080/ -H 'Host: zhirang.hdd.ink'
 ```
 
 Check health and metrics:
@@ -77,6 +48,8 @@ Check health and metrics:
 curl -v 127.0.0.1:8080/health
 curl -v 127.0.0.1:8080/metrics
 ```
+
+Opening `http://127.0.0.1:8080` directly sends `Host: 127.0.0.1:8080`, so it is not equivalent to `hdd.ink`. Use a Host header, `/etc/hosts`, or `curl --resolve` for local browser/domain testing.
 
 Non-matching hosts are rejected:
 
@@ -88,7 +61,7 @@ curl -v 127.0.0.1:8080/ -H 'Host: example.com'
 
 To issue real certificates, ACME must be able to reach the gateway over public HTTP for the requested hostname.
 
-1. Point DNS for `*.page.hdd.ink` to the gateway server.
+1. Point DNS for both `hdd.ink` and `*.hdd.ink` to the gateway server.
 2. Expose the HTTP listener on public port `80` and HTTPS listener on public port `443`.
 3. Run an ask service at `tls.ask_url`; it should return a 2xx status for allowed hostnames and non-2xx for denied hostnames.
 4. Configure `acme.email` and the ACME `directory_url`.
@@ -112,7 +85,7 @@ The gateway sends a GET request to `tls.ask_url` with the requested hostname as 
 Example request:
 
 ```text
-GET /ask?domain=demo.page.hdd.ink
+GET /ask?domain=zhirang.hdd.ink
 ```
 
 - Return `200` to allow issuance.
@@ -164,7 +137,7 @@ docker run --rm \
   stellar-gateway --gatewayfile /app/Gatewayfile
 ```
 
-For production, update `Gatewayfile` to bind `0.0.0.0:80` and `0.0.0.0:443`, then publish those ports:
+For production, publish the gateway on ports 80 and 443 and configure DNS for both the apex and wildcard hosts:
 
 ```bash
 docker run -d --name stellar-gateway \

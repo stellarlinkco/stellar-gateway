@@ -3,7 +3,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::thread;
@@ -11,25 +11,30 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+type UpstreamHandle = (
+    SocketAddr,
+    Arc<AtomicUsize>,
+    Arc<Mutex<String>>,
+    Arc<AtomicBool>,
+    thread::JoinHandle<()>,
+);
+
 fn pick_unused_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral");
     listener.local_addr().expect("local addr").port()
 }
 
-fn start_upstream() -> (
-    SocketAddr,
-    Arc<AtomicUsize>,
-    Arc<AtomicBool>,
-    thread::JoinHandle<()>,
-) {
+fn start_upstream() -> UpstreamHandle {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind upstream");
     listener.set_nonblocking(true).expect("set_nonblocking");
 
     let addr = listener.local_addr().expect("local addr");
     let request_count = Arc::new(AtomicUsize::new(0));
+    let last_request = Arc::new(Mutex::new(String::new()));
     let stop = Arc::new(AtomicBool::new(false));
 
     let request_count_thread = Arc::clone(&request_count);
+    let last_request_thread = Arc::clone(&last_request);
     let stop_thread = Arc::clone(&stop);
 
     let handle = thread::spawn(move || {
@@ -56,6 +61,10 @@ fn start_upstream() -> (
                         }
                     }
 
+                    if let Ok(request) = String::from_utf8(seen.clone()) {
+                        *last_request_thread.lock().expect("lock last request") = request;
+                    }
+
                     let body = b"upstream-ok";
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -73,7 +82,7 @@ fn start_upstream() -> (
         }
     });
 
-    (addr, request_count, stop, handle)
+    (addr, request_count, last_request, stop, handle)
 }
 
 fn gateway_bin_path() -> PathBuf {
@@ -99,13 +108,10 @@ fn gateway_bin_path() -> PathBuf {
 }
 
 fn write_gatewayfile(dir: &TempDir, http_port: u16, upstream: SocketAddr) -> std::path::PathBuf {
-    let gatewayfile_path = dir.path().join("Gatewayfile");
-    let cache_dir = dir.path().join("cert-cache");
-    std::fs::create_dir_all(&cache_dir).expect("create cert-cache dir");
-    let cache_dir_display = cache_dir.display();
-
-    let contents = format!(
-        r#"listeners:
+    write_gatewayfile_contents(
+        dir,
+        format!(
+            r#"listeners:
   http:
     bind: "127.0.0.1:{http_port}"
   https:
@@ -127,16 +133,43 @@ acme:
   http_01: true
 
 cert_cache:
-  dir: "{cache_dir_display}"
+  dir: "{}"
 
 reload:
   enabled: false
 
 logging:
   level: "error"
-"#
-    );
+"#,
+            dir.path().join("cert-cache").display()
+        ),
+    )
+}
 
+fn write_caddyfile_gatewayfile(
+    dir: &TempDir,
+    http_port: u16,
+    upstream: SocketAddr,
+) -> std::path::PathBuf {
+    write_gatewayfile_contents(
+        dir,
+        format!(
+            r#"{{
+	http_port {http_port}
+	https_port 0
+}}
+
+hdd.ink, *.hdd.ink {{
+	reverse_proxy {upstream}
+}}
+"#
+        ),
+    )
+}
+
+fn write_gatewayfile_contents(dir: &TempDir, contents: String) -> std::path::PathBuf {
+    let gatewayfile_path = dir.path().join("Gatewayfile");
+    std::fs::create_dir_all(dir.path().join("cert-cache")).expect("create cert-cache dir");
     std::fs::write(&gatewayfile_path, contents).expect("write Gatewayfile");
     gatewayfile_path
 }
@@ -169,8 +202,23 @@ fn http_get(port: u16, host_header: &str) -> (u16, Vec<u8>) {
 }
 
 fn http_get_path(port: u16, host_header: &str, path: &str) -> (u16, Vec<u8>) {
+    http_get_path_with_extra_headers(port, host_header, path, &[])
+}
+
+fn http_get_path_with_extra_headers(
+    port: u16,
+    host_header: &str,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+) -> (u16, Vec<u8>) {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect gateway");
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n\r\n");
+    let extra_headers = extra_headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect::<String>();
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {host_header}\r\n{extra_headers}Connection: close\r\n\r\n"
+    );
     stream.write_all(req.as_bytes()).expect("write request");
 
     let mut resp = Vec::new();
@@ -195,6 +243,7 @@ struct TestEnv {
     _temp: TempDir,
     gateway_port: u16,
     upstream_count: Arc<AtomicUsize>,
+    last_upstream_request: Arc<Mutex<String>>,
     upstream_stop: Arc<AtomicBool>,
     upstream_handle: Option<thread::JoinHandle<()>>,
     gateway_child: Child,
@@ -202,11 +251,20 @@ struct TestEnv {
 
 impl TestEnv {
     fn new() -> Self {
+        Self::new_with_gatewayfile(write_gatewayfile)
+    }
+
+    fn new_with_caddyfile() -> Self {
+        Self::new_with_gatewayfile(write_caddyfile_gatewayfile)
+    }
+
+    fn new_with_gatewayfile(writer: fn(&TempDir, u16, SocketAddr) -> std::path::PathBuf) -> Self {
         let temp = TempDir::new().expect("tempdir");
 
-        let (upstream_addr, upstream_count, upstream_stop, upstream_handle) = start_upstream();
+        let (upstream_addr, upstream_count, last_upstream_request, upstream_stop, upstream_handle) =
+            start_upstream();
         let gateway_port = pick_unused_port();
-        let gatewayfile = write_gatewayfile(&temp, gateway_port, upstream_addr);
+        let gatewayfile = writer(&temp, gateway_port, upstream_addr);
 
         let gateway_child = spawn_gateway(&gatewayfile);
         wait_for_listen(gateway_port);
@@ -215,6 +273,7 @@ impl TestEnv {
             _temp: temp,
             gateway_port,
             upstream_count,
+            last_upstream_request,
             upstream_stop,
             upstream_handle: Some(upstream_handle),
             gateway_child,
@@ -241,6 +300,52 @@ fn gateway_should_proxy_to_upstream_when_host_matches_wildcard() {
     let upstream_count = env.upstream_count.load(Ordering::SeqCst);
 
     assert_eq!((status, upstream_count), (200, 1));
+}
+
+#[test]
+fn gateway_should_proxy_caddyfile_apex_and_wildcard_hosts() {
+    let env = TestEnv::new_with_caddyfile();
+
+    let (apex_status, _apex_resp) = http_get(env.gateway_port, "hdd.ink");
+    let (tenant_status, _tenant_resp) = http_get(env.gateway_port, "zhirang.hdd.ink");
+    let (second_tenant_status, _second_tenant_resp) = http_get(env.gateway_port, "aichao.hdd.ink");
+    let upstream_count = env.upstream_count.load(Ordering::SeqCst);
+
+    assert_eq!(
+        (
+            apex_status,
+            tenant_status,
+            second_tenant_status,
+            upstream_count
+        ),
+        (200, 200, 200, 3)
+    );
+}
+
+#[test]
+fn gateway_should_preserve_host_and_overwrite_forwarded_host() {
+    let env = TestEnv::new_with_caddyfile();
+
+    let (status, _resp) = http_get_path_with_extra_headers(
+        env.gateway_port,
+        "zhirang.hdd.ink",
+        "/",
+        &[("X-Forwarded-Host", "attacker.example")],
+    );
+    let upstream_request = env
+        .last_upstream_request
+        .lock()
+        .expect("lock last request")
+        .clone();
+    let normalized_request = upstream_request.to_ascii_lowercase();
+
+    assert!(
+        status == 200
+            && normalized_request.contains("\r\nhost: zhirang.hdd.ink\r\n")
+            && normalized_request.contains("\r\nx-forwarded-host: zhirang.hdd.ink\r\n")
+            && !normalized_request.contains("attacker.example"),
+        "status={status}; upstream_request={upstream_request}"
+    );
 }
 
 #[test]

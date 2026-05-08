@@ -11,7 +11,7 @@ use crate::cert_cache::{CertificateCache, CertificateMaterial};
 use crate::config::GatewayConfig;
 use crate::error::{GatewayError, Result};
 use crate::metrics::METRICS;
-use crate::routing::{is_wildcard_host_match, normalize_host};
+use crate::routing::normalize_host;
 use crate::tls::{AskClient, AskDecision};
 
 pub struct GatewayRuntimeState {
@@ -213,12 +213,12 @@ impl GatewayRuntimeState {
         }
 
         let config = self.config();
-        if !is_wildcard_host_match(&hostname, &config.routes.wildcard.suffix) {
+        if !config.routes.is_routable_host(&hostname) {
             tracing::warn!(
                 event = "tls_issuance_policy",
                 hostname = %hostname,
                 decision = "deny",
-                reason_class = "wildcard_mismatch",
+                reason_class = "route_mismatch",
                 "tls_issuance_policy"
             );
             return None;

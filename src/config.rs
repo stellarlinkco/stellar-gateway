@@ -6,6 +6,7 @@ use tracing_subscriber::EnvFilter;
 use url::Url;
 
 use crate::error::{GatewayError, Result};
+use crate::routing::{is_exact_host_match, is_wildcard_host_match, normalize_host};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,7 +42,16 @@ pub struct HttpsListenerConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoutesConfig {
+    #[serde(default)]
+    pub apex: Option<ApexRouteConfig>,
     pub wildcard: WildcardRouteConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApexRouteConfig {
+    pub host: String,
+    pub upstream: UpstreamConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,6 +68,18 @@ pub struct UpstreamConfig {
     pub tls: bool,
     #[serde(default)]
     pub server_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteKind {
+    Apex,
+    Wildcard,
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteSelection {
+    pub kind: RouteKind,
+    pub upstream: UpstreamConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -100,6 +122,32 @@ impl LoggingConfig {
     }
 }
 
+impl RoutesConfig {
+    pub fn select_route(&self, host: &str) -> Option<RouteSelection> {
+        if let Some(apex) = &self.apex
+            && is_exact_host_match(host, &apex.host)
+        {
+            return Some(RouteSelection {
+                kind: RouteKind::Apex,
+                upstream: apex.upstream.clone(),
+            });
+        }
+
+        if is_wildcard_host_match(host, &self.wildcard.suffix) {
+            return Some(RouteSelection {
+                kind: RouteKind::Wildcard,
+                upstream: self.wildcard.upstream.clone(),
+            });
+        }
+
+        None
+    }
+
+    pub fn is_routable_host(&self, host: &str) -> bool {
+        self.select_route(host).is_some()
+    }
+}
+
 impl GatewayConfig {
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -113,6 +161,23 @@ impl GatewayConfig {
     }
 
     pub fn load_from_str(contents: &str) -> Result<Self> {
+        if looks_like_yaml_gatewayfile(contents) {
+            return Self::load_from_yaml_str(contents);
+        }
+
+        match Self::load_from_yaml_str(contents) {
+            Ok(config) => Ok(config),
+            Err(yaml_error) => {
+                if contents.contains('{') || contents.contains("reverse_proxy") {
+                    parse_caddyfile_subset(contents)
+                } else {
+                    Err(yaml_error)
+                }
+            }
+        }
+    }
+
+    fn load_from_yaml_str(contents: &str) -> Result<Self> {
         let deserializer = serde_yaml::Deserializer::from_str(contents);
         let config: Self = serde_path_to_error::deserialize(deserializer).map_err(|err| {
             let path = err.path().to_string();
@@ -129,32 +194,22 @@ impl GatewayConfig {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.routes.wildcard.suffix.trim().is_empty() {
+        if let Some(apex) = &self.routes.apex {
+            if normalize_host(&apex.host).is_none() {
+                return Err(GatewayError::Gatewayfile(
+                    "routes.apex.host must be a valid host".to_owned(),
+                ));
+            }
+            validate_upstream("routes.apex.upstream", &apex.upstream)?;
+        }
+
+        if normalize_host(&self.routes.wildcard.suffix).is_none() {
             return Err(GatewayError::Gatewayfile(
-                "routes.wildcard.suffix must not be empty".to_owned(),
+                "routes.wildcard.suffix must be a valid host suffix".to_owned(),
             ));
         }
 
-        if self.routes.wildcard.upstream.addr.trim().is_empty() {
-            return Err(GatewayError::Gatewayfile(
-                "routes.wildcard.upstream.addr must not be empty".to_owned(),
-            ));
-        }
-
-        if self.routes.wildcard.upstream.tls
-            && self
-                .routes
-                .wildcard
-                .upstream
-                .server_name
-                .as_deref()
-                .is_none_or(|name| name.trim().is_empty())
-        {
-            return Err(GatewayError::Gatewayfile(
-                "routes.wildcard.upstream.server_name must be set when upstream.tls is true"
-                    .to_owned(),
-            ));
-        }
+        validate_upstream("routes.wildcard.upstream", &self.routes.wildcard.upstream)?;
 
         if self.cert_cache.dir.as_os_str().is_empty() {
             return Err(GatewayError::Gatewayfile(
@@ -182,4 +237,241 @@ impl GatewayConfig {
 
         Ok(())
     }
+}
+
+fn validate_upstream(path: &str, upstream: &UpstreamConfig) -> Result<()> {
+    if upstream.addr.trim().is_empty() {
+        return Err(GatewayError::Gatewayfile(format!(
+            "{path}.addr must not be empty"
+        )));
+    }
+
+    if upstream.tls
+        && upstream
+            .server_name
+            .as_deref()
+            .is_none_or(|name| name.trim().is_empty())
+    {
+        return Err(GatewayError::Gatewayfile(format!(
+            "{path}.server_name must be set when upstream.tls is true"
+        )));
+    }
+
+    Ok(())
+}
+
+fn looks_like_yaml_gatewayfile(contents: &str) -> bool {
+    let trimmed = contents.trim_start();
+    trimmed.starts_with("listeners:")
+        || trimmed.starts_with("routes:")
+        || trimmed.starts_with("tls:")
+        || trimmed.starts_with("acme:")
+        || trimmed.starts_with("cert_cache:")
+        || trimmed.starts_with("reload:")
+        || trimmed.starts_with("logging:")
+}
+
+fn parse_caddyfile_subset(contents: &str) -> Result<GatewayConfig> {
+    let without_comments = contents
+        .lines()
+        .map(|line| line.split_once('#').map_or(line, |(left, _)| left).trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut caddyfile = without_comments.trim();
+    let mut http_bind = "0.0.0.0:8080".to_owned();
+    let mut https_bind = "0.0.0.0:8443".to_owned();
+
+    if caddyfile.starts_with('{') {
+        let (global_options, rest) = split_leading_caddy_block(caddyfile)?;
+        for line in global_options
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let mut parts = line.split_whitespace();
+            match (parts.next(), parts.next(), parts.next()) {
+                (Some("http_port"), Some(port), None) => http_bind = format!("0.0.0.0:{port}"),
+                (Some("https_port"), Some(port), None) => https_bind = format!("0.0.0.0:{port}"),
+                (Some(option), _, _) => {
+                    return Err(GatewayError::Gatewayfile(format!(
+                        "unsupported Caddyfile global option `{option}`"
+                    )));
+                }
+                (None, _, _) => {}
+            }
+        }
+        caddyfile = rest.trim();
+    }
+
+    let (addresses, body_with_suffix) = caddyfile.split_once('{').ok_or_else(|| {
+        GatewayError::Gatewayfile("Caddyfile route block must contain `{`".to_owned())
+    })?;
+    let (body, trailing) = body_with_suffix.rsplit_once('}').ok_or_else(|| {
+        GatewayError::Gatewayfile("Caddyfile route block must contain `}`".to_owned())
+    })?;
+
+    if !trailing.trim().is_empty() {
+        return Err(GatewayError::Gatewayfile(
+            "Caddyfile subset supports a single route block".to_owned(),
+        ));
+    }
+
+    let mut apex_host = None;
+    let mut wildcard_suffix = None;
+    for raw_address in addresses.split(',') {
+        let address = raw_address.trim();
+        if address.is_empty() {
+            continue;
+        }
+
+        if let Some(suffix) = address.strip_prefix("*.") {
+            let normalized = normalize_host(suffix).ok_or_else(|| {
+                GatewayError::Gatewayfile(format!("invalid Caddyfile wildcard address `{address}`"))
+            })?;
+            wildcard_suffix = Some(normalized);
+        } else {
+            let normalized = normalize_host(address).ok_or_else(|| {
+                GatewayError::Gatewayfile(format!("invalid Caddyfile site address `{address}`"))
+            })?;
+            apex_host = Some(normalized);
+        }
+    }
+
+    let Some(wildcard_suffix) = wildcard_suffix else {
+        return Err(GatewayError::Gatewayfile(
+            "Caddyfile route block must include a wildcard address like `*.hdd.ink`".to_owned(),
+        ));
+    };
+
+    let mut upstream = None;
+    for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let mut parts = line.split_whitespace();
+        let directive = parts.next().unwrap_or_default();
+        match directive {
+            "reverse_proxy" => {
+                if upstream.is_some() {
+                    return Err(GatewayError::Gatewayfile(
+                        "Caddyfile subset supports one reverse_proxy directive".to_owned(),
+                    ));
+                }
+                let target = parts.next().ok_or_else(|| {
+                    GatewayError::Gatewayfile("reverse_proxy requires an upstream".to_owned())
+                })?;
+                if parts.next().is_some() {
+                    return Err(GatewayError::Gatewayfile(
+                        "reverse_proxy supports exactly one upstream in this subset".to_owned(),
+                    ));
+                }
+                upstream = Some(parse_reverse_proxy_upstream(target)?);
+            }
+            other => {
+                return Err(GatewayError::Gatewayfile(format!(
+                    "unsupported Caddyfile directive `{other}`"
+                )));
+            }
+        }
+    }
+
+    let upstream = upstream.ok_or_else(|| {
+        GatewayError::Gatewayfile("Caddyfile route block must include reverse_proxy".to_owned())
+    })?;
+
+    let apex = apex_host.map(|host| ApexRouteConfig {
+        host,
+        upstream: upstream.clone(),
+    });
+    let config = GatewayConfig {
+        listeners: ListenersConfig {
+            http: HttpListenerConfig {
+                bind: http_bind.parse().map_err(|err| {
+                    GatewayError::Gatewayfile(format!("invalid Caddyfile http_port: {err}"))
+                })?,
+            },
+            https: HttpsListenerConfig {
+                bind: https_bind.parse().map_err(|err| {
+                    GatewayError::Gatewayfile(format!("invalid Caddyfile https_port: {err}"))
+                })?,
+            },
+        },
+        routes: RoutesConfig {
+            apex,
+            wildcard: WildcardRouteConfig {
+                suffix: wildcard_suffix,
+                upstream,
+            },
+        },
+        tls: TlsConfig {
+            ask_url: Url::parse("http://127.0.0.1:9000/ask").expect("valid default ask url"),
+        },
+        acme: AcmeConfig {
+            directory_url: Url::parse("https://acme-staging-v02.api.letsencrypt.org/directory")
+                .expect("valid default acme url"),
+            email: "admin@example.com".to_owned(),
+            http_01: true,
+            ca_cert_path: None,
+        },
+        cert_cache: CertCacheConfig {
+            dir: PathBuf::from("./cert-cache"),
+        },
+        reload: ReloadConfig { enabled: true },
+        logging: LoggingConfig {
+            level: "info".to_owned(),
+        },
+    };
+
+    config.validate()?;
+    Ok(config)
+}
+
+fn split_leading_caddy_block(contents: &str) -> Result<(&str, &str)> {
+    let mut depth = 0usize;
+    for (index, ch) in contents.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Ok((&contents[1..index], &contents[index + 1..]));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Err(GatewayError::Gatewayfile(
+        "Caddyfile global options block must contain `}`".to_owned(),
+    ))
+}
+
+fn parse_reverse_proxy_upstream(target: &str) -> Result<UpstreamConfig> {
+    if target.trim().is_empty() {
+        return Err(GatewayError::Gatewayfile(
+            "reverse_proxy upstream must not be empty".to_owned(),
+        ));
+    }
+
+    if let Some(addr) = target.strip_prefix("http://") {
+        return Ok(UpstreamConfig {
+            addr: addr.to_owned(),
+            tls: false,
+            server_name: None,
+        });
+    }
+
+    if let Some(addr) = target.strip_prefix("https://") {
+        let server_name = addr.split(':').next().filter(|name| !name.is_empty());
+        return Ok(UpstreamConfig {
+            addr: addr.to_owned(),
+            tls: true,
+            server_name: server_name.map(str::to_owned),
+        });
+    }
+
+    Ok(UpstreamConfig {
+        addr: target.to_owned(),
+        tls: false,
+        server_name: None,
+    })
 }

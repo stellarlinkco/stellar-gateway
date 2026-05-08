@@ -29,6 +29,17 @@ pub fn normalize_host(host_header_value: &str) -> Option<String> {
     Some(without_port.to_ascii_lowercase())
 }
 
+pub fn is_exact_host_match(host_header_value: &str, configured_host: &str) -> bool {
+    let Some(host) = normalize_host(host_header_value) else {
+        return false;
+    };
+    let Some(configured_host) = normalize_host(configured_host) else {
+        return false;
+    };
+
+    host == configured_host
+}
+
 pub fn is_wildcard_host_match(host_header_value: &str, suffix: &str) -> bool {
     let Some(host) = normalize_host(host_header_value) else {
         return false;

@@ -6,8 +6,8 @@ services:
     environment:
       RUST_LOG: info
     ports:
-      - "18080:8080"
-      - "18443:8443"
+      - "${ACCEPTANCE_HTTP_PORT:-28080}:8080"
+      - "${ACCEPTANCE_HTTPS_PORT:-28443}:8443"
     volumes:
       - ./.acceptance/Gatewayfile:/app/Gatewayfile:ro
       - ./.acceptance/cert-cache:/cache

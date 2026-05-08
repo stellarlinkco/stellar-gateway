@@ -1,29 +1,3 @@
-listeners:
-  http:
-    bind: "0.0.0.0:8080"
-  https:
-    bind: "0.0.0.0:8443"
-
-routes:
-  wildcard:
-    suffix: "page.hdd.ink"
-    upstream:
-      addr: "127.0.0.1:3000"
-      tls: false
-
-tls:
-  ask_url: "http://127.0.0.1:9000/ask"
-
-acme:
-  directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory"
-  email: "admin@example.com"
-  http_01: true
-
-cert_cache:
-  dir: "./cert-cache"
-
-reload:
-  enabled: true
-
-logging:
-  level: "info"
+hdd.ink, *.hdd.ink {
+	reverse_proxy 127.0.0.1:3000
+}

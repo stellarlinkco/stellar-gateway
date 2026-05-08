@@ -59,6 +59,7 @@ fn gatewayfile_should_load_https_listener_bind() {
 fn gatewayfile_should_load_wildcard_route_suffix() {
     let config = load_valid();
     assert_eq!(config.routes.wildcard.suffix, "page.hdd.ink");
+    assert!(config.routes.apex.is_none());
 }
 
 #[test]
@@ -239,4 +240,73 @@ logging:
 
     let err = GatewayConfig::load_from_str(invalid).unwrap_err();
     assert!(err.to_string().contains("acme.http_01 must be true"));
+}
+
+#[test]
+fn gatewayfile_should_load_caddyfile_subset_route() {
+    let config = GatewayConfig::load_from_str(
+        r#"
+hdd.ink, *.hdd.ink {
+	reverse_proxy website:3000
+}
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        (
+            config.routes.apex.as_ref().map(|route| route.host.as_str()),
+            config.routes.wildcard.suffix.as_str(),
+            config.routes.wildcard.upstream.addr.as_str(),
+            config.routes.wildcard.upstream.tls,
+        ),
+        (Some("hdd.ink"), "hdd.ink", "website:3000", false)
+    );
+    assert!(config.routes.is_routable_host("hdd.ink"));
+    assert!(config.routes.is_routable_host("zhirang.hdd.ink"));
+}
+
+#[test]
+fn gatewayfile_should_load_caddyfile_subset_with_http_upstream() {
+    let config = GatewayConfig::load_from_str(
+        r#"
+hdd.ink, *.hdd.ink {
+	reverse_proxy http://website:3000
+}
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(config.routes.wildcard.upstream.addr, "website:3000");
+    assert!(!config.routes.wildcard.upstream.tls);
+}
+
+#[test]
+fn gatewayfile_should_reject_caddyfile_unsupported_directive() {
+    let err = GatewayConfig::load_from_str(
+        r#"
+hdd.ink, *.hdd.ink {
+	encode gzip
+}
+"#,
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string()
+            .contains("unsupported Caddyfile directive `encode`")
+    );
+}
+
+#[test]
+fn gatewayfile_should_reject_caddyfile_without_reverse_proxy() {
+    let err = GatewayConfig::load_from_str(
+        r#"
+hdd.ink, *.hdd.ink {
+}
+"#,
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("must include reverse_proxy"));
 }

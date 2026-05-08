@@ -4,14 +4,14 @@ use std::time::Instant;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::header;
-use pingora::http::{ResponseHeader, StatusCode};
+use pingora::http::{RequestHeader, ResponseHeader, StatusCode};
 use pingora::prelude::{HttpPeer, ProxyHttp, Session};
 
 use crate::acme::{Http01ChallengeStore, Http01Decision, Http01Request, Http01RequestPolicy};
-use crate::config::GatewayConfig;
+use crate::config::{GatewayConfig, RouteKind, UpstreamConfig};
 use crate::metrics::METRICS;
 use crate::reload::GatewayRuntimeState;
-use crate::routing::{RouteMatch, is_wildcard_host_match, normalize_host};
+use crate::routing::{RouteMatch, normalize_host};
 
 pub struct GatewayProxy {
     config: GatewayProxyConfig,
@@ -37,10 +37,13 @@ impl GatewayProxyConfig {
 pub struct RequestCtx {
     started_at: Instant,
     host: Option<String>,
+    original_host: Option<String>,
     path: String,
     request_id: Option<String>,
     route_match: RouteMatch,
+    route_kind: Option<RouteKind>,
     upstream: Option<String>,
+    selected_upstream: Option<UpstreamConfig>,
     acme_http01: bool,
     http01_responded: bool,
 }
@@ -50,10 +53,13 @@ impl RequestCtx {
         Self {
             started_at: Instant::now(),
             host: None,
+            original_host: None,
             path: String::new(),
             request_id: None,
             route_match: RouteMatch::NoMatch,
+            route_kind: None,
             upstream: None,
+            selected_upstream: None,
             acme_http01: false,
             http01_responded: false,
         }
@@ -91,8 +97,10 @@ impl GatewayProxy {
 
     pub fn active_upstream_for_host(&self, host: &str) -> Option<String> {
         let config = self.config.current();
-        is_wildcard_host_match(host, &config.routes.wildcard.suffix)
-            .then_some(config.routes.wildcard.upstream.addr)
+        config
+            .routes
+            .select_route(host)
+            .map(|selection| selection.upstream.addr)
     }
 
     async fn respond_text(
@@ -169,14 +177,21 @@ impl ProxyHttp for GatewayProxy {
         };
 
         ctx.host = normalize_host(host);
+        ctx.original_host = Some(host.to_owned());
         let log_host = ctx.host.as_deref().unwrap_or("<unparseable>");
 
         let config = self.config.current();
-        let route_match = if is_wildcard_host_match(host, &config.routes.wildcard.suffix) {
+        let route_selection = config.routes.select_route(host);
+        let route_match = if route_selection.is_some() {
             RouteMatch::Matched
         } else {
             RouteMatch::NoMatch
         };
+        if let Some(selection) = route_selection {
+            ctx.route_kind = Some(selection.kind);
+            ctx.upstream = Some(selection.upstream.addr.clone());
+            ctx.selected_upstream = Some(selection.upstream);
+        }
         ctx.route_match = route_match;
 
         if path.starts_with("/.well-known/acme-challenge/") {
@@ -213,14 +228,14 @@ impl ProxyHttp for GatewayProxy {
         match route_match {
             RouteMatch::Matched => {
                 METRICS.record_route_match();
-                ctx.upstream = Some(config.routes.wildcard.upstream.addr.clone());
                 tracing::info!(
                     event = "routing",
                     host = %log_host,
                     path = %ctx.path,
                     request_id = ctx.request_id.as_deref(),
-                    upstream = %config.routes.wildcard.upstream.addr,
-                    "matched wildcard route"
+                    route_kind = ?ctx.route_kind,
+                    upstream = ctx.upstream.as_deref(),
+                    "matched route"
                 );
                 Ok(false)
             }
@@ -245,14 +260,17 @@ impl ProxyHttp for GatewayProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> pingora::Result<Box<HttpPeer>> {
-        let config = self.config.current();
-        let upstream = config.routes.wildcard.upstream;
+        let upstream = ctx
+            .selected_upstream
+            .clone()
+            .expect("matched routes must select an upstream");
         ctx.upstream = Some(upstream.addr.clone());
         tracing::info!(
             event = "proxy_upstream",
             host = ctx.host.as_deref(),
             path = %ctx.path,
             request_id = ctx.request_id.as_deref(),
+            route_kind = ?ctx.route_kind,
             upstream = %upstream.addr,
             upstream_tls = upstream.tls,
             "selected upstream peer"
@@ -260,6 +278,22 @@ impl ProxyHttp for GatewayProxy {
         let server_name = upstream.server_name.clone().unwrap_or_default();
         let peer = HttpPeer::new(upstream.addr.as_str(), upstream.tls, server_name);
         Ok(Box::new(peer))
+    }
+
+    async fn upstream_request_filter(
+        &self,
+        _session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        ctx: &mut Self::CTX,
+    ) -> pingora::Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        if let Some(host) = ctx.original_host.as_deref() {
+            upstream_request.insert_header("Host", host)?;
+            upstream_request.insert_header("X-Forwarded-Host", host)?;
+        }
+        Ok(())
     }
 
     async fn logging(&self, session: &mut Session, e: Option<&pingora::Error>, ctx: &mut Self::CTX)
@@ -282,6 +316,7 @@ impl ProxyHttp for GatewayProxy {
             path = %ctx.path,
             request_id = ctx.request_id.as_deref(),
             route_match = ?ctx.route_match,
+            route_kind = ?ctx.route_kind,
             upstream = ctx.upstream.as_deref(),
             status,
             latency_ms,

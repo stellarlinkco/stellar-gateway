@@ -10,9 +10,9 @@
 
 > **Goal**: Build a Pingora-based reverse proxy and dynamic TLS gateway that can replace the user's current nginx performance gateway and Caddy automatic SSL gateway for the MVP domain workflow.
 > **Non-Goals**: Admin UI, full pingap parity, Kubernetes integration, WAF, multi-node certificate synchronization, complex load balancing, generic plugin framework, route authorization in ask endpoint.
-> **Primary Workflow**: Operator defines listeners, wildcard host routing, On-Demand TLS policy, ACME HTTP-01, certificate cache, and upstreams in a Gatewayfile; the gateway serves `*.page.hdd.ink` over HTTP/HTTPS and proxies matching hosts to one fixed MVP upstream.
+> **Primary Workflow**: Operator defines Caddyfile-style apex and wildcard host routing, On-Demand TLS policy, ACME HTTP-01, certificate cache, and upstreams in a Gatewayfile; the gateway serves `hdd.ink` and `*.hdd.ink` over HTTP/HTTPS and proxies matching hosts to one fixed MVP upstream.
 > **Success Metric**: A local or staged smoke test proves Gatewayfile load, wildcard host match, ask-based certificate authorization, HTTP-01 challenge handling, certificate cache reuse, reverse proxy forwarding, config hot reload, certificate hot reload, and structured logging.
-> **Key Constraints**: Rust + Cloudflare Pingora, Gatewayfile as MVP configuration format, On-Demand TLS restricted by ask endpoint, ask endpoint only authorizes certificate issuance, `*.page.hdd.ink` maps to one fixed upstream in MVP.
+> **Key Constraints**: Rust + Cloudflare Pingora, Gatewayfile as MVP configuration format, On-Demand TLS restricted by ask endpoint, ask endpoint only authorizes certificate issuance, `hdd.ink` and `*.hdd.ink` map to one fixed upstream in MVP.
 > **Verification Path**: Rust unit/integration tests for Gatewayfile parsing, routing, TLS authorization, cache behavior, and hot reload; staged end-to-end test with a controlled domain or local ACME-compatible test setup.
 > **Domain**: Rust API/network gateway, public-facing reverse proxy and TLS automation infrastructure.
 
@@ -22,7 +22,7 @@
 
 StellarGate is a high-performance reverse proxy and dynamic TLS gateway built on Cloudflare Pingora. The MVP replaces the user's split setup where nginx handles performance-sensitive gateway traffic and Caddy handles quick automatic SSL, while avoiding nginx Lua for future business logic.
 
-The first release focuses on one closed loop: route wildcard dynamic subdomains under `*.page.hdd.ink`, issue certificates through restricted On-Demand TLS, handle ACME HTTP-01 challenges, cache certificates locally, proxy traffic to a fixed upstream, reload configuration and certificates without restart, and emit useful logs.
+The first release focuses on one closed loop: route the apex host `hdd.ink` and wildcard dynamic subdomains under `*.hdd.ink`, issue certificates through restricted On-Demand TLS, handle ACME HTTP-01 challenges, cache certificates locally, proxy traffic to a fixed upstream, reload configuration and certificates without restart, and emit useful logs.
 
 The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate replication, complex plugins, and complex load balancing so implementation can deliver a reliable gateway core first.
 
@@ -41,7 +41,7 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 ## Goals
 
 - Replace the current nginx + Caddy MVP gateway responsibilities with one Pingora-based Rust service.
-- Serve dynamic hosts matching `*.page.hdd.ink` through wildcard host routing and one fixed MVP upstream.
+- Serve `hdd.ink` and dynamic hosts matching `*.hdd.ink` through Caddyfile-style host routing and one fixed MVP upstream.
 - Support On-Demand TLS certificate issuance gated by an ask endpoint.
 - Support ACME HTTP-01 challenge handling for certificate issuance.
 - Cache issued certificates locally and reuse them after restart or reload.
@@ -58,7 +58,7 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 - Do not implement complex load balancing, active health checks, canary routing, or weighted upstream pools.
 - Do not implement a generic plugin framework.
 - Do not use the ask endpoint for request routing authorization; it only authorizes certificate issuance.
-- Do not add nginx-compatible config parsing; Gatewayfile is the MVP config format.
+- Do not add nginx-compatible config parsing; Gatewayfile is the MVP config format, with a small Caddyfile-compatible route subset for low-friction migration from Caddy.
 
 ---
 
@@ -72,7 +72,7 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 - The implementation must be based on Cloudflare Pingora.
 - MVP configuration format is Gatewayfile.
 - The ask endpoint authorizes certificate issuance only.
-- `*.page.hdd.ink` maps to one fixed upstream in MVP.
+- `*.hdd.ink` maps to one fixed upstream in MVP.
 - MVP hot reload includes configuration and certificates.
 - Core scenarios include wildcard host routing, On-Demand TLS, ask endpoint restrictions, ACME HTTP-01, local certificate cache, reverse proxying, hot reload, and logging.
 - After PRD completion, the next implementation workflow must create a `/mission`.
@@ -83,7 +83,7 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 - The primary operator is the project owner or infrastructure engineer configuring and running the gateway.
 - The first deploy target is a single-node gateway process.
 - The MVP can use one configured ACME account and one local certificate storage directory.
-- The fixed upstream for `*.page.hdd.ink` is configurable in Gatewayfile even though the MVP supports only one upstream for this wildcard.
+- The fixed upstream for `*.hdd.ink` is configurable in Gatewayfile even though the MVP supports only one upstream for this wildcard.
 - Logs can be structured text logs suitable for local development and service log collection.
 - The initial Rust skeleton is not authoritative when it conflicts with this PRD.
 
@@ -132,14 +132,14 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 ### Story 2: Route Wildcard Dynamic Subdomains
 
 **As a** gateway operator  
-**I want to** route hosts matching `*.page.hdd.ink` to one fixed upstream  
+**I want to** route hosts matching `*.hdd.ink` to one fixed upstream
 **So that** dynamic page subdomains work without per-host route entries
 
 **Acceptance Criteria:**
 
-- [ ] Requests with `Host: any-valid-label.page.hdd.ink` match the wildcard route and proxy to the configured fixed upstream.
-- [ ] Requests outside `*.page.hdd.ink` do not match the wildcard route and return a deterministic gateway error response.
-- [ ] The route match treats the apex `page.hdd.ink` as non-matching unless Gatewayfile explicitly defines it.
+- [ ] Requests with `Host: any-valid-label.hdd.ink` match the wildcard route and proxy to the configured fixed upstream.
+- [ ] Requests outside `*.hdd.ink` do not match the wildcard route and return a deterministic gateway error response.
+- [ ] The route match treats the apex `hdd.ink` as non-matching unless Gatewayfile explicitly defines it.
 
 ### Story 3: Issue Certificates Through Restricted On-Demand TLS
 
@@ -149,7 +149,7 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 
 **Acceptance Criteria:**
 
-- [ ] TLS handshakes for uncached `*.page.hdd.ink` hostnames call the configured ask endpoint before certificate issuance.
+- [ ] TLS handshakes for uncached `*.hdd.ink` hostnames call the configured ask endpoint before certificate issuance.
 - [ ] A positive ask response allows certificate issuance for the requested hostname.
 - [ ] A negative, timeout, malformed, or network-failed ask response denies certificate issuance and logs the denial reason.
 - [ ] The ask endpoint decision does not authorize or deny HTTP request routing after a certificate exists; routing is decided only by Gatewayfile routes.
@@ -208,7 +208,7 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 
 ### FR-2: Wildcard Host Matching
 
-- **Description**: Requests whose host has exactly one or more labels before `page.hdd.ink` and end with `.page.hdd.ink` match the MVP wildcard route.
+- **Description**: Requests whose host has exactly one or more labels before `hdd.ink` and end with `.hdd.ink` match the MVP wildcard route.
 - **Trigger**: Gateway receives an HTTP request or TLS SNI hostname.
 - **Expected Result**: Matching hosts use the configured wildcard route; non-matching hosts are rejected by routing or certificate policy.
 - **Traces to**: Story 2 / Goal 2
@@ -277,7 +277,7 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 |----|-------------|----------|---------------|
 | A1 | Valid Gatewayfile activates all MVP settings | P0 | Config parser test loads a representative Gatewayfile and asserts listener, wildcard, upstream, TLS, ACME, ask, cache, reload, and logging values. |
 | A2 | Invalid Gatewayfile fails clearly | P0 | Parser test feeds invalid syntax and unsupported fields, then asserts non-zero startup or rejected reload with field-specific error. |
-| A3 | `*.page.hdd.ink` routes to fixed upstream | P0 | Integration test sends matching Host header and asserts upstream receives request. |
+| A3 | `*.hdd.ink` routes to fixed upstream | P0 | Integration test sends matching Host header and asserts upstream receives request. |
 | A4 | Non-matching hosts are rejected | P0 | Integration test sends outside-domain Host header and asserts deterministic gateway error with no upstream request. |
 | A5 | Ask endpoint gates certificate issuance only | P0 | TLS authorization test asserts ask is called for uncached issuance and routing still depends on Gatewayfile after ask success. |
 | A6 | Ask failures deny certificate issuance | P0 | Tests cover negative, timeout, malformed, and network-failed ask responses. |
@@ -292,8 +292,8 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 
 ## Edge Cases & Failure Handling
 
-- **Case**: Host is `page.hdd.ink` without a subdomain.
-  - Expected behavior: Does not match `*.page.hdd.ink` unless explicitly configured as a separate route.
+- **Case**: Host is `hdd.ink` without a subdomain.
+  - Expected behavior: Does not match `*.hdd.ink` unless explicitly configured as a separate route.
 - **Case**: Host contains uppercase letters.
   - Expected behavior: Host matching is case-insensitive after safe hostname normalization.
 - **Case**: Host includes a port in the HTTP `Host` header.
@@ -335,7 +335,7 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 - **Pingora**: Provides reverse proxy foundation and service runtime.
 - **ACME provider**: Must support HTTP-01 issuance for MVP dynamic TLS.
 - **Ask endpoint**: External or local HTTP service that returns certificate issuance authorization.
-- **Fixed upstream**: Receives all routed `*.page.hdd.ink` MVP traffic.
+- **Fixed upstream**: Receives all routed `*.hdd.ink` MVP traffic.
 - **Local filesystem**: Stores Gatewayfile and certificate cache.
 
 ### Platform Constraints
@@ -354,7 +354,7 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 
 - Gatewayfile parser and validator for all MVP settings.
 - Pingora-based HTTP reverse proxy listener.
-- Wildcard host routing for `*.page.hdd.ink`.
+- Wildcard host routing for `*.hdd.ink`.
 - One fixed upstream for the wildcard route.
 - On-Demand TLS authorization through ask endpoint.
 - ACME HTTP-01 challenge handling.
@@ -389,11 +389,11 @@ The MVP intentionally excludes UI, Kubernetes, WAF, multi-node certificate repli
 
 ### Good Outcome Example
 
-- Gatewayfile configures `*.page.hdd.ink`, ask endpoint, ACME HTTP-01, cache directory, reload behavior, and upstream `http://127.0.0.1:3000`. A request to `https://demo.page.hdd.ink/hello` obtains or reuses an authorized certificate, matches the wildcard route, proxies to the fixed upstream, and logs the route, TLS, cache, and proxy result.
+- Gatewayfile configures `*.hdd.ink`, ask endpoint, ACME HTTP-01, cache directory, reload behavior, and upstream `http://127.0.0.1:3000`. A request to `https://demo.hdd.ink/hello` obtains or reuses an authorized certificate, matches the wildcard route, proxies to the fixed upstream, and logs the route, TLS, cache, and proxy result.
 
 ### Counterexample
 
-- Ask endpoint approves certificate issuance for `demo.page.hdd.ink`, then the gateway routes `demo.page.hdd.ink` despite no matching Gatewayfile route. This is wrong because ask approval is not route authorization.
+- Ask endpoint approves certificate issuance for `demo.hdd.ink`, then the gateway routes `demo.hdd.ink` despite no matching Gatewayfile route. This is wrong because ask approval is not route authorization.
 
 ### Counterexample
 

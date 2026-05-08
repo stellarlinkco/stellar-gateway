@@ -8,7 +8,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ["docker", "compose", "-f", "docker-compose.acceptance.yml"]
-HOST = "demo.page.hdd.ink"
+APEX_HOST = "hdd.ink"
+HOST = "demo.hdd.ink"
+HTTP_PORT = os.environ.get("ACCEPTANCE_HTTP_PORT", "28080")
+HTTPS_PORT = os.environ.get("ACCEPTANCE_HTTPS_PORT", "28443")
 
 
 def run(args, **kwargs):
@@ -28,8 +31,13 @@ def gatewayfile(upstream: str = "upstream:3000", reload_enabled: bool = True) ->
     bind: "0.0.0.0:8443"
 
 routes:
+  apex:
+    host: "hdd.ink"
+    upstream:
+      addr: "{upstream}"
+      tls: false
   wildcard:
-    suffix: "page.hdd.ink"
+    suffix: "hdd.ink"
     upstream:
       addr: "{upstream}"
       tls: false
@@ -65,18 +73,18 @@ def curl(args):
     return capture(["curl", "--noproxy", "*", "-fsS", "--max-time", "8", *args])
 
 
-def wait_for_http(expected: str):
+def wait_for_http(expected: str, host: str = HOST):
     deadline = time.time() + 60
     last = ""
     while time.time() < deadline:
         try:
-            last = curl(["-H", f"Host: {HOST}", "http://127.0.0.1:18080/"])
+            last = curl(["-H", f"Host: {host}", f"http://127.0.0.1:{HTTP_PORT}/"])
             if expected in last:
                 return
         except subprocess.CalledProcessError as err:
             last = err.stdout or str(err)
         time.sleep(1)
-    raise AssertionError(f"HTTP route did not return {expected!r}; last={last!r}")
+    raise AssertionError(f"HTTP route for {host} did not return {expected!r}; last={last!r}")
 
 
 def assert_https_issues_and_proxies():
@@ -87,8 +95,8 @@ def assert_https_issues_and_proxies():
             out = curl([
                 "-k",
                 "--resolve",
-                f"{HOST}:18443:127.0.0.1",
-                f"https://{HOST}:18443/",
+                f"{HOST}:{HTTPS_PORT}:127.0.0.1",
+                f"https://{HOST}:{HTTPS_PORT}/",
             ])
             if "upstream-one" in out:
                 return
@@ -113,7 +121,7 @@ def assert_non_matching_host_rejected():
             "%{http_code}",
             "-H",
             "Host: example.com",
-            "http://127.0.0.1:18080/",
+            f"http://127.0.0.1:{HTTP_PORT}/",
         ],
         cwd=ROOT,
         text=True,
@@ -130,8 +138,8 @@ def assert_health_and_metrics():
     last = ""
     while time.time() < deadline:
         try:
-            health = curl(["http://127.0.0.1:18080/health"])
-            metrics = curl(["http://127.0.0.1:18080/metrics"])
+            health = curl([f"http://127.0.0.1:{HTTP_PORT}/health"])
+            metrics = curl([f"http://127.0.0.1:{HTTP_PORT}/metrics"])
             if health == "ok\n" and "stellar_gateway_requests_total" in metrics:
                 return
             last = f"health={health!r}; metrics={metrics!r}"
@@ -149,7 +157,8 @@ def main():
     try:
         run([*COMPOSE, "up", "-d", "--build"])
         assert_health_and_metrics()
-        wait_for_http("upstream-one")
+        wait_for_http("upstream-one", APEX_HOST)
+        wait_for_http("upstream-one", HOST)
         assert_non_matching_host_rejected()
         assert_https_issues_and_proxies()
         run([*COMPOSE, "exec", "-T", "gateway", "test", "-f", f"/cache/{HOST}.yaml"])
@@ -168,8 +177,8 @@ def main():
         out = curl([
             "-k",
             "--resolve",
-            f"{HOST}:18443:127.0.0.1",
-            f"https://{HOST}:18443/",
+            f"{HOST}:{HTTPS_PORT}:127.0.0.1",
+            f"https://{HOST}:{HTTPS_PORT}/",
         ])
         if "upstream-two" not in out:
             raise AssertionError(f"cached HTTPS after restart failed: {out!r}")

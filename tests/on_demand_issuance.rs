@@ -50,6 +50,47 @@ logging:
     )
 }
 
+fn caddyfile_gatewayfile(cache_dir: &std::path::Path, ask_port: u16) -> String {
+    format!(
+        r#"listeners:
+  http:
+    bind: "127.0.0.1:8080"
+  https:
+    bind: "127.0.0.1:8443"
+
+routes:
+  apex:
+    host: "hdd.ink"
+    upstream:
+      addr: "127.0.0.1:3000"
+      tls: false
+  wildcard:
+    suffix: "hdd.ink"
+    upstream:
+      addr: "127.0.0.1:3000"
+      tls: false
+
+tls:
+  ask_url: "http://127.0.0.1:{ask_port}/ask"
+
+acme:
+  directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory"
+  email: "admin@example.com"
+  http_01: true
+
+cert_cache:
+  dir: "{}"
+
+reload:
+  enabled: true
+
+logging:
+  level: "info"
+"#,
+        cache_dir.display()
+    )
+}
+
 fn start_ask_server(status_line: &'static str, max_requests: usize) -> (u16, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ask server");
     let port = listener.local_addr().unwrap().port();
@@ -128,6 +169,107 @@ async fn runtime_should_issue_and_cache_certificate_when_ask_allows() {
             && issuer_calls.load(Ordering::SeqCst) == 1
             && ask_calls.load(Ordering::SeqCst) == 1
             && state.certificate_for("demo.page.hdd.ink").is_some()
+    );
+}
+
+#[tokio::test]
+async fn runtime_should_issue_apex_certificate_when_exact_route_allows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ask_port, ask_calls) = start_ask_server("HTTP/1.1 200 OK", 2);
+    let gatewayfile_path = dir.path().join("Gatewayfile");
+    std::fs::write(
+        &gatewayfile_path,
+        caddyfile_gatewayfile(&dir.path().join("cert-cache"), ask_port),
+    )
+    .unwrap();
+    let config = GatewayConfig::load_from_path(&gatewayfile_path).unwrap();
+    let issuer_calls = Arc::new(AtomicUsize::new(0));
+    let state = GatewayRuntimeState::new_with_issuer(
+        config,
+        &gatewayfile_path,
+        SystemTime::now(),
+        Arc::new(FakeIssuer {
+            calls: Arc::clone(&issuer_calls),
+        }),
+    )
+    .unwrap();
+
+    let material = state
+        .certificate_for_sni("hdd.ink")
+        .await
+        .expect("issued apex certificate material");
+
+    assert!(
+        material.certificate_pem().contains("BEGIN CERTIFICATE")
+            && issuer_calls.load(Ordering::SeqCst) == 1
+            && ask_calls.load(Ordering::SeqCst) == 1
+            && state.certificate_for("hdd.ink").is_some()
+    );
+}
+
+#[tokio::test]
+async fn runtime_should_not_call_ask_or_issuer_for_legacy_wildcard_apex_sni() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ask_port, ask_calls) = start_ask_server("HTTP/1.1 200 OK", 1);
+    let gatewayfile_path = dir.path().join("Gatewayfile");
+    std::fs::write(
+        &gatewayfile_path,
+        gatewayfile(&dir.path().join("cert-cache"), ask_port),
+    )
+    .unwrap();
+    let config = GatewayConfig::load_from_path(&gatewayfile_path).unwrap();
+    let issuer_calls = Arc::new(AtomicUsize::new(0));
+    let state = GatewayRuntimeState::new_with_issuer(
+        config,
+        &gatewayfile_path,
+        SystemTime::now(),
+        Arc::new(FakeIssuer {
+            calls: Arc::clone(&issuer_calls),
+        }),
+    )
+    .unwrap();
+
+    let material = state.certificate_for_sni("page.hdd.ink").await;
+
+    assert!(
+        material.is_none()
+            && issuer_calls.load(Ordering::SeqCst) == 0
+            && ask_calls.load(Ordering::SeqCst) == 0
+    );
+}
+
+#[tokio::test]
+async fn runtime_should_issue_wildcard_certificate_when_caddyfile_route_allows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (ask_port, ask_calls) = start_ask_server("HTTP/1.1 200 OK", 2);
+    let gatewayfile_path = dir.path().join("Gatewayfile");
+    std::fs::write(
+        &gatewayfile_path,
+        caddyfile_gatewayfile(&dir.path().join("cert-cache"), ask_port),
+    )
+    .unwrap();
+    let config = GatewayConfig::load_from_path(&gatewayfile_path).unwrap();
+    let issuer_calls = Arc::new(AtomicUsize::new(0));
+    let state = GatewayRuntimeState::new_with_issuer(
+        config,
+        &gatewayfile_path,
+        SystemTime::now(),
+        Arc::new(FakeIssuer {
+            calls: Arc::clone(&issuer_calls),
+        }),
+    )
+    .unwrap();
+
+    let material = state
+        .certificate_for_sni("zhirang.hdd.ink")
+        .await
+        .expect("issued wildcard certificate material");
+
+    assert!(
+        material.certificate_pem().contains("BEGIN CERTIFICATE")
+            && issuer_calls.load(Ordering::SeqCst) == 1
+            && ask_calls.load(Ordering::SeqCst) == 1
+            && state.certificate_for("zhirang.hdd.ink").is_some()
     );
 }
 

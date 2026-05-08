@@ -58,7 +58,10 @@ fn main() -> Result<()> {
         gatewayfile = %cli.gatewayfile.display(),
         http_listen = %http_bind,
         https_listen = %https_bind,
-        upstream = %config.routes.wildcard.upstream.addr,
+        apex_host = config.routes.apex.as_ref().map(|route| route.host.as_str()),
+        apex_upstream = config.routes.apex.as_ref().map(|route| route.upstream.addr.as_str()),
+        wildcard_suffix = %config.routes.wildcard.suffix,
+        wildcard_upstream = %config.routes.wildcard.upstream.addr,
         "starting stellar gateway"
     );
     server.run_forever();
