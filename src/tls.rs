@@ -6,6 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use openssl::error::ErrorStack;
 use openssl::pkey::{PKey, Private};
 use openssl::x509::X509;
 use pingora::listeners::tls::TlsSettings;
@@ -101,8 +102,8 @@ impl TlsAccept for GatewayTlsAccept {
                 },
             },
         };
-        let certificate = match X509::from_pem(material.certificate_pem().as_bytes()) {
-            Ok(certificate) => certificate,
+        let (certificate, chain) = match parse_certificate_material(&material) {
+            Ok(certificate_chain) => certificate_chain,
             Err(err) => {
                 tracing::warn!(event = "tls_certificate_select", hostname = %sni, error = %err, "tls_certificate_select");
                 return;
@@ -120,6 +121,12 @@ impl TlsAccept for GatewayTlsAccept {
         if let Err(err) = ext::ssl_use_certificate(ssl, &certificate) {
             tracing::warn!(event = "tls_certificate_select", hostname = %sni, error = %err, "tls_certificate_select");
             return;
+        }
+        for chain_certificate in &chain {
+            if let Err(err) = ext::ssl_add_chain_cert(ssl, chain_certificate) {
+                tracing::warn!(event = "tls_certificate_select", hostname = %sni, error = %err, "tls_certificate_select");
+                return;
+            }
         }
         if let Err(err) = ext::ssl_use_private_key(ssl, &private_key) {
             tracing::warn!(event = "tls_certificate_select", hostname = %sni, error = %err, "tls_certificate_select");
@@ -151,6 +158,20 @@ fn select_gateway_alpn<'a>(
 
 fn should_use_tls_alpn_challenge(selected_alpn: Option<&[u8]>) -> bool {
     matches!(selected_alpn, Some(protocol) if protocol == b"acme-tls/1")
+}
+
+fn parse_certificate_material(
+    material: &crate::cert_cache::CertificateMaterial,
+) -> Result<(X509, Vec<X509>), ErrorStack> {
+    let mut certificates = X509::stack_from_pem(material.certificate_pem().as_bytes())?;
+    if certificates.is_empty() {
+        return X509::from_pem(material.certificate_pem().as_bytes())
+            .map(|certificate| (certificate, Vec::new()));
+    }
+
+    let chain = certificates.split_off(1);
+    let certificate = certificates.remove(0);
+    Ok((certificate, chain))
 }
 
 impl AskClient {
@@ -281,5 +302,27 @@ mod tests {
         assert!(!should_use_tls_alpn_challenge(Some(b"h2")));
         assert!(!should_use_tls_alpn_challenge(Some(b"http/1.1")));
         assert!(should_use_tls_alpn_challenge(Some(b"acme-tls/1")));
+    }
+
+    #[test]
+    fn certificate_material_preserves_leaf_and_chain_from_concatenated_pem() {
+        let leaf = rcgen::generate_simple_self_signed(vec!["geo.stellarlink.co".to_owned()])
+            .expect("leaf certificate can be generated");
+        let intermediate = rcgen::generate_simple_self_signed(vec!["test intermediate".to_owned()])
+            .expect("intermediate certificate can be generated");
+        let material = crate::cert_cache::CertificateMaterial::new(
+            format!("{}{}", leaf.cert.pem(), intermediate.cert.pem()),
+            leaf.signing_key.serialize_pem(),
+        );
+
+        let (parsed_leaf, chain) =
+            parse_certificate_material(&material).expect("certificate chain parses");
+
+        assert_eq!(parsed_leaf.to_pem().unwrap(), leaf.cert.pem().into_bytes());
+        assert_eq!(chain.len(), 1);
+        assert_eq!(
+            chain[0].to_pem().unwrap(),
+            intermediate.cert.pem().into_bytes()
+        );
     }
 }
