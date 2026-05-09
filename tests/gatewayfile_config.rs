@@ -205,7 +205,7 @@ fn gatewayfile_should_load_from_path() {
 }
 
 #[test]
-fn gatewayfile_should_error_when_acme_http01_disabled() {
+fn gatewayfile_should_error_when_all_acme_challenges_disabled() {
     let invalid = r#"
 listeners:
   http:
@@ -227,6 +227,7 @@ acme:
   directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory"
   email: "admin@example.com"
   http_01: false
+  tls_alpn_01: false
 
 cert_cache:
   dir: "./cert-cache"
@@ -239,7 +240,10 @@ logging:
 "#;
 
     let err = GatewayConfig::load_from_str(invalid).unwrap_err();
-    assert!(err.to_string().contains("acme.http_01 must be true"));
+    assert!(
+        err.to_string()
+            .contains("at least one ACME challenge must be enabled")
+    );
 }
 
 #[test]

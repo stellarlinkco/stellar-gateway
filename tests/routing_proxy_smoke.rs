@@ -9,6 +9,9 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 
+use pingora::prelude::{Opt, Server, http_proxy_service};
+use stellar_gateway::config::GatewayConfig;
+use stellar_gateway::proxy::GatewayProxy;
 use tempfile::TempDir;
 
 type UpstreamHandle = (
@@ -186,6 +189,26 @@ fn spawn_gateway(gatewayfile: &std::path::Path) -> Child {
         .expect("spawn stellar-gateway")
 }
 
+fn spawn_in_process_gateway_with_http01_challenge(
+    gatewayfile: &std::path::Path,
+    host: &str,
+    token: &str,
+    body: &str,
+) {
+    let config = GatewayConfig::load_from_path(gatewayfile).expect("load Gatewayfile");
+    let http_bind = config.listeners.http.bind.to_string();
+    let proxy = GatewayProxy::new(config);
+    proxy.http01_store().set_for_host(host, token, body);
+
+    let mut server = Server::new(Some(Opt::default())).expect("create pingora server");
+    server.bootstrap();
+    let mut service = http_proxy_service(&server.configuration, proxy);
+    service.add_tcp(&http_bind);
+    server.add_service(service);
+
+    thread::spawn(move || server.run_forever());
+}
+
 fn wait_for_listen(port: u16) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(3) {
@@ -300,6 +323,40 @@ fn gateway_should_proxy_to_upstream_when_host_matches_wildcard() {
     let upstream_count = env.upstream_count.load(Ordering::SeqCst);
 
     assert_eq!((status, upstream_count), (200, 1));
+}
+
+#[test]
+fn gateway_should_answer_active_http01_challenge_before_upstream_routing() {
+    let temp = TempDir::new().expect("tempdir");
+    let (upstream_addr, upstream_count, _last_request, upstream_stop, upstream_handle) =
+        start_upstream();
+    let gateway_port = pick_unused_port();
+    let gatewayfile = write_gatewayfile(&temp, gateway_port, upstream_addr);
+
+    spawn_in_process_gateway_with_http01_challenge(
+        &gatewayfile,
+        "demo.page.hdd.ink",
+        "unit-token",
+        "unit-keyauth",
+    );
+    wait_for_listen(gateway_port);
+
+    let (status, resp) = http_get_path(
+        gateway_port,
+        "demo.page.hdd.ink",
+        "/.well-known/acme-challenge/unit-token",
+    );
+    upstream_stop.store(true, Ordering::SeqCst);
+    let _ = upstream_handle.join();
+
+    assert!(
+        status == 200
+            && resp.ends_with(b"unit-keyauth")
+            && upstream_count.load(Ordering::SeqCst) == 0,
+        "status={status}; upstream_count={}; resp={}",
+        upstream_count.load(Ordering::SeqCst),
+        String::from_utf8_lossy(&resp)
+    );
 }
 
 #[test]

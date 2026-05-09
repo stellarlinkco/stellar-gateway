@@ -16,16 +16,17 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use instant_acme::{
     Account, AccountBuilder, AccountCredentials, AuthorizationStatus, BodyWrapper, BytesResponse,
-    ChallengeType, Error as AcmeError, HttpClient, Identifier, NewAccount, NewOrder, OrderStatus,
-    RetryPolicy,
+    Challenge, ChallengeType, Error as AcmeError, HttpClient, Identifier, NewAccount, NewOrder,
+    OrderStatus, RetryPolicy,
 };
+use rcgen::{CertificateParams, CustomExtension, KeyPair};
 use rustls::RootCertStore;
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject;
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::Mutex;
 
-use crate::acme::Http01ChallengeStore;
+use crate::acme::{Http01ChallengeStore, TlsAlpnChallengeStore};
 use crate::cert_cache::{CertificateCacheEntry, CertificateMaterial};
 use crate::config::GatewayConfig;
 use crate::error::{GatewayError, Result};
@@ -36,7 +37,8 @@ pub trait AcmeIssuer: Send + Sync {
         &self,
         config: &GatewayConfig,
         hostname: &str,
-        store: &Http01ChallengeStore,
+        http01_store: &Http01ChallengeStore,
+        tls_alpn_store: &TlsAlpnChallengeStore,
     ) -> Result<CertificateCacheEntry>;
 }
 
@@ -51,7 +53,8 @@ impl AcmeIssuer for InstantAcmeIssuer {
         &self,
         config: &GatewayConfig,
         hostname: &str,
-        store: &Http01ChallengeStore,
+        http01_store: &Http01ChallengeStore,
+        tls_alpn_store: &TlsAlpnChallengeStore,
     ) -> Result<CertificateCacheEntry> {
         let account = self.account(config).await?;
         let identifiers = [Identifier::Dns(hostname.to_owned())];
@@ -60,7 +63,7 @@ impl AcmeIssuer for InstantAcmeIssuer {
             .await
             .map_err(|err| GatewayError::Acme(format!("failed to create order: {err}")))?;
 
-        let mut active_tokens = Vec::new();
+        let mut active_challenges = ActiveChallengeGuard::new(http01_store, tls_alpn_store);
         {
             let mut authorizations = order.authorizations();
             while let Some(authz_result) = authorizations.next().await {
@@ -78,13 +81,35 @@ impl AcmeIssuer for InstantAcmeIssuer {
                     }
                 }
 
-                let mut challenge = authz.challenge(ChallengeType::Http01).ok_or_else(|| {
-                    GatewayError::Acme("authorization did not offer HTTP-01 challenge".to_owned())
+                let challenge_type = select_challenge_type(config, &authz.challenges)?;
+                let mut challenge = authz.challenge(challenge_type.clone()).ok_or_else(|| {
+                    GatewayError::Acme(format!(
+                        "authorization did not offer {challenge_type:?} challenge"
+                    ))
                 })?;
-                let token = challenge.token.clone();
-                let key_authorization = challenge.key_authorization().as_str().to_owned();
-                store.set_for_host(hostname, &token, &key_authorization);
-                active_tokens.push(token);
+                let key_authorization = challenge.key_authorization();
+
+                match challenge_type {
+                    ChallengeType::TlsAlpn01 => {
+                        let material = tls_alpn_challenge_material(
+                            hostname,
+                            key_authorization.digest().as_ref(),
+                        )?;
+                        tls_alpn_store.set_for_host(hostname, material);
+                        active_challenges.track_tls_alpn(hostname.to_owned());
+                    }
+                    ChallengeType::Http01 => {
+                        let token = challenge.token.clone();
+                        http01_store.set_for_host(hostname, &token, key_authorization.as_str());
+                        active_challenges.track_http01(token);
+                    }
+                    other => {
+                        return Err(GatewayError::Acme(format!(
+                            "unsupported challenge type selected: {other:?}"
+                        )));
+                    }
+                }
+
                 challenge.set_ready().await.map_err(|err| {
                     GatewayError::Acme(format!("failed to set challenge ready: {err}"))
                 })?;
@@ -96,9 +121,6 @@ impl AcmeIssuer for InstantAcmeIssuer {
             .await
             .map_err(|err| GatewayError::Acme(format!("failed while polling order: {err}")))?;
         if ready != OrderStatus::Ready {
-            for token in &active_tokens {
-                store.clear(token);
-            }
             return Err(GatewayError::Acme(format!(
                 "order did not become ready: {ready:?}"
             )));
@@ -113,15 +135,110 @@ impl AcmeIssuer for InstantAcmeIssuer {
             .await
             .map_err(|err| GatewayError::Acme(format!("failed to fetch certificate: {err}")))?;
 
-        for token in &active_tokens {
-            store.clear(token);
-        }
-
         Ok(CertificateCacheEntry::new(
             hostname,
             CertificateMaterial::new(certificate_pem, private_key_pem),
             SystemTime::now() + Duration::from_secs(60 * 60 * 24 * 90),
         ))
+    }
+}
+
+fn select_challenge_type(
+    config: &GatewayConfig,
+    challenges: &[Challenge],
+) -> Result<ChallengeType> {
+    if config.acme.tls_alpn_01
+        && challenges
+            .iter()
+            .any(|challenge| challenge.r#type == ChallengeType::TlsAlpn01)
+    {
+        return Ok(ChallengeType::TlsAlpn01);
+    }
+
+    if config.acme.http_01
+        && challenges
+            .iter()
+            .any(|challenge| challenge.r#type == ChallengeType::Http01)
+    {
+        return Ok(ChallengeType::Http01);
+    }
+
+    Err(GatewayError::Acme(
+        "authorization did not offer an enabled HTTP-01 or TLS-ALPN-01 challenge".to_owned(),
+    ))
+}
+
+fn tls_alpn_challenge_material(hostname: &str, digest: &[u8]) -> Result<CertificateMaterial> {
+    let mut params = CertificateParams::new(vec![hostname.to_owned()]).map_err(|err| {
+        GatewayError::Acme(format!(
+            "failed to build TLS-ALPN-01 certificate params: {err}"
+        ))
+    })?;
+    params
+        .custom_extensions
+        .push(CustomExtension::new_acme_identifier(digest));
+    let key_pair = KeyPair::generate()
+        .map_err(|err| GatewayError::Acme(format!("failed to generate TLS-ALPN-01 key: {err}")))?;
+    let certificate = params.self_signed(&key_pair).map_err(|err| {
+        GatewayError::Acme(format!("failed to generate TLS-ALPN-01 certificate: {err}"))
+    })?;
+    Ok(CertificateMaterial::new(
+        certificate.pem(),
+        key_pair.serialize_pem(),
+    ))
+}
+
+struct ActiveChallengeGuard<'a> {
+    http01_store: &'a Http01ChallengeStore,
+    tls_alpn_store: &'a TlsAlpnChallengeStore,
+    http01_tokens: Vec<String>,
+    tls_alpn_hosts: Vec<String>,
+}
+
+impl<'a> ActiveChallengeGuard<'a> {
+    fn new(
+        http01_store: &'a Http01ChallengeStore,
+        tls_alpn_store: &'a TlsAlpnChallengeStore,
+    ) -> Self {
+        Self {
+            http01_store,
+            tls_alpn_store,
+            http01_tokens: Vec::new(),
+            tls_alpn_hosts: Vec::new(),
+        }
+    }
+
+    fn track_http01(&mut self, token: String) {
+        self.http01_tokens.push(token);
+    }
+
+    fn track_tls_alpn(&mut self, host: String) {
+        self.tls_alpn_hosts.push(host);
+    }
+}
+
+impl Drop for ActiveChallengeGuard<'_> {
+    fn drop(&mut self) {
+        clear_active_challenges(
+            self.http01_store,
+            self.tls_alpn_store,
+            &self.http01_tokens,
+            &self.tls_alpn_hosts,
+        );
+    }
+}
+
+fn clear_active_challenges(
+    http01_store: &Http01ChallengeStore,
+    tls_alpn_store: &TlsAlpnChallengeStore,
+    http01_tokens: &[String],
+    tls_alpn_hosts: &[String],
+) {
+    for token in http01_tokens {
+        http01_store.clear(token);
+    }
+    for host in tls_alpn_hosts {
+        tls_alpn_store.clear_for_host(host);
     }
 }
 
@@ -368,6 +485,39 @@ mod tests {
     #[derive(Clone, Debug, Deserialize, Serialize)]
     struct TestCredentials {
         id: String,
+    }
+
+    #[test]
+    fn active_challenge_guard_should_clear_http01_and_tls_alpn_on_error_drop() {
+        fn fail_after_tracking(
+            http01_store: &Http01ChallengeStore,
+            tls_alpn_store: &TlsAlpnChallengeStore,
+        ) -> Result<()> {
+            let mut guard = ActiveChallengeGuard::new(http01_store, tls_alpn_store);
+            guard.track_http01("unit-token".to_owned());
+            guard.track_tls_alpn("demo.page.hdd.ink".to_owned());
+            Err(GatewayError::Acme("simulated issuance failure".to_owned()))
+        }
+
+        let http01_store = Http01ChallengeStore::default();
+        let tls_alpn_store = TlsAlpnChallengeStore::default();
+        http01_store.set_for_host("demo.page.hdd.ink", "unit-token", "keyauth");
+        tls_alpn_store.set_for_host(
+            "demo.page.hdd.ink",
+            CertificateMaterial::new("certificate", "private key"),
+        );
+
+        let result = fail_after_tracking(&http01_store, &tls_alpn_store);
+
+        assert!(result.is_err());
+        assert_eq!(
+            crate::acme::http01_body_for_path(
+                "/.well-known/acme-challenge/unit-token",
+                &http01_store,
+            ),
+            None
+        );
+        assert!(tls_alpn_store.get_for_host("demo.page.hdd.ink").is_none());
     }
 
     #[tokio::test]

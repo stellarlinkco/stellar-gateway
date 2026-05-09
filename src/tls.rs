@@ -8,10 +8,11 @@ use std::{
 use async_trait::async_trait;
 use openssl::pkey::{PKey, Private};
 use openssl::x509::X509;
+use pingora::listeners::tls::TlsSettings;
 use pingora::listeners::{TlsAccept, TlsAcceptCallbacks};
 use pingora::protocols::tls::TlsRef;
 use pingora::tls::ext;
-use pingora::tls::ssl::NameType;
+use pingora::tls::ssl::{AlpnError, NameType, SslRef, select_next_proto};
 use thiserror::Error;
 use url::Url;
 
@@ -72,6 +73,13 @@ impl GatewayTlsAccept {
     fn cached_material_for_sni(&self, sni: &str) -> Option<crate::cert_cache::CertificateMaterial> {
         self.runtime_state.certificate_for(sni)
     }
+
+    fn tls_alpn_challenge_material_for_sni(
+        &self,
+        sni: &str,
+    ) -> Option<crate::cert_cache::CertificateMaterial> {
+        self.runtime_state.tls_alpn_challenge_for(sni)
+    }
 }
 
 #[async_trait]
@@ -80,11 +88,17 @@ impl TlsAccept for GatewayTlsAccept {
         let Some(sni) = ssl.servername(NameType::HOST_NAME).map(ToOwned::to_owned) else {
             return;
         };
-        let (material, source) = match self.cached_material_for_sni(&sni) {
-            Some(material) => (material, "cache"),
-            None => match self.runtime_state.certificate_for_sni(&sni).await {
-                Some(material) => (material, "issued"),
-                None => return,
+        let selected_alpn = ssl.selected_alpn_protocol();
+        let (material, source) = match self.tls_alpn_challenge_material_for_sni(&sni) {
+            Some(material) if should_use_tls_alpn_challenge(selected_alpn) => {
+                (material, "tls-alpn-01")
+            }
+            _ => match self.cached_material_for_sni(&sni) {
+                Some(material) => (material, "cache"),
+                None => match self.runtime_state.certificate_for_sni(&sni).await {
+                    Some(material) => (material, "issued"),
+                    None => return,
+                },
             },
         };
         let certificate = match X509::from_pem(material.certificate_pem().as_bytes()) {
@@ -117,6 +131,26 @@ impl TlsAccept for GatewayTlsAccept {
 
 pub fn tls_accept_callbacks(runtime_state: Arc<GatewayRuntimeState>) -> TlsAcceptCallbacks {
     Box::new(GatewayTlsAccept::new(runtime_state))
+}
+
+pub fn tls_settings(runtime_state: Arc<GatewayRuntimeState>) -> pingora::Result<TlsSettings> {
+    let mut settings = TlsSettings::with_callbacks(tls_accept_callbacks(runtime_state))?;
+    settings.set_alpn_select_callback(select_gateway_alpn);
+    Ok(settings)
+}
+
+fn select_gateway_alpn<'a>(
+    _ssl: &mut SslRef,
+    client_protocols: &'a [u8],
+) -> std::result::Result<&'a [u8], AlpnError> {
+    if client_protocols.is_empty() {
+        return Err(AlpnError::NOACK);
+    }
+    select_next_proto(b"\x0aacme-tls/1\x02h2\x08http/1.1", client_protocols).ok_or(AlpnError::NOACK)
+}
+
+fn should_use_tls_alpn_challenge(selected_alpn: Option<&[u8]>) -> bool {
+    matches!(selected_alpn, Some(protocol) if protocol == b"acme-tls/1")
 }
 
 impl AskClient {
@@ -234,5 +268,18 @@ impl AskClient {
         } else {
             Self::deny(hostname, AskDenyReason::Denied)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_alpn_challenge_material_requires_negotiated_acme_alpn() {
+        assert!(!should_use_tls_alpn_challenge(None));
+        assert!(!should_use_tls_alpn_challenge(Some(b"h2")));
+        assert!(!should_use_tls_alpn_challenge(Some(b"http/1.1")));
+        assert!(should_use_tls_alpn_challenge(Some(b"acme-tls/1")));
     }
 }

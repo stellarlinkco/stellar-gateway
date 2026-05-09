@@ -7,7 +7,7 @@ use std::sync::{
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use stellar_gateway::acme::Http01ChallengeStore;
+use stellar_gateway::acme::{Http01ChallengeStore, TlsAlpnChallengeStore};
 use stellar_gateway::acme_issuer::AcmeIssuer;
 use stellar_gateway::cert_cache::{CertificateCacheEntry, CertificateMaterial};
 use stellar_gateway::config::GatewayConfig;
@@ -122,7 +122,8 @@ impl AcmeIssuer for FakeIssuer {
         &self,
         _config: &GatewayConfig,
         hostname: &str,
-        _store: &Http01ChallengeStore,
+        _http01_store: &Http01ChallengeStore,
+        _tls_alpn_store: &TlsAlpnChallengeStore,
     ) -> stellar_gateway::error::Result<CertificateCacheEntry> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let certificate = rcgen::generate_simple_self_signed(vec![hostname.to_owned()]).unwrap();

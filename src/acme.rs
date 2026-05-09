@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use crate::cert_cache::CertificateMaterial;
 use crate::routing::RouteMatch;
 
 const HTTP01_PREFIX: &str = "/.well-known/acme-challenge/";
@@ -14,6 +15,49 @@ enum ChallengeKey {
 #[derive(Debug, Clone, Default)]
 pub struct Http01ChallengeStore {
     inner: Arc<RwLock<HashMap<ChallengeKey, String>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TlsAlpnChallengeStore {
+    inner: Arc<RwLock<HashMap<String, CertificateMaterial>>>,
+}
+
+impl TlsAlpnChallengeStore {
+    pub fn set_for_host(&self, host: &str, material: CertificateMaterial) {
+        let mut guard = match self.inner.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.insert(host.to_owned(), material);
+        tracing::info!(
+            event = "acme_tls_alpn01",
+            host = %host,
+            decision = "stored_host_challenge",
+            "stored host-scoped tls-alpn-01 challenge"
+        );
+    }
+
+    pub fn get_for_host(&self, host: &str) -> Option<CertificateMaterial> {
+        let guard = match self.inner.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.get(host).cloned()
+    }
+
+    pub fn clear_for_host(&self, host: &str) {
+        let mut guard = match self.inner.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.remove(host);
+        tracing::info!(
+            event = "acme_tls_alpn01",
+            host = %host,
+            decision = "cleared_challenge",
+            "cleared tls-alpn-01 challenge"
+        );
+    }
 }
 
 impl Http01ChallengeStore {

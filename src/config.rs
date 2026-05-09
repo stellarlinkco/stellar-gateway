@@ -94,6 +94,8 @@ pub struct AcmeConfig {
     pub directory_url: Url,
     pub email: String,
     pub http_01: bool,
+    #[serde(default = "default_true")]
+    pub tls_alpn_01: bool,
     #[serde(default)]
     pub ca_cert_path: Option<PathBuf>,
 }
@@ -146,6 +148,10 @@ impl RoutesConfig {
     pub fn is_routable_host(&self, host: &str) -> bool {
         self.select_route(host).is_some()
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl GatewayConfig {
@@ -217,9 +223,9 @@ impl GatewayConfig {
             ));
         }
 
-        if !self.acme.http_01 {
+        if !self.acme.http_01 && !self.acme.tls_alpn_01 {
             return Err(GatewayError::Gatewayfile(
-                "acme.http_01 must be true for MVP".to_owned(),
+                "at least one ACME challenge must be enabled".to_owned(),
             ));
         }
 
@@ -410,6 +416,7 @@ fn parse_caddyfile_subset(contents: &str) -> Result<GatewayConfig> {
                 .expect("valid default acme url"),
             email: "admin@example.com".to_owned(),
             http_01: true,
+            tls_alpn_01: true,
             ca_cert_path: None,
         },
         cert_cache: CertCacheConfig {

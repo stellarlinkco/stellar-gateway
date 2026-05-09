@@ -5,7 +5,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
-use crate::acme::Http01ChallengeStore;
+use crate::acme::{Http01ChallengeStore, TlsAlpnChallengeStore};
 use crate::acme_issuer::{AcmeIssuer, InstantAcmeIssuer};
 use crate::cert_cache::{CertificateCache, CertificateMaterial};
 use crate::config::GatewayConfig;
@@ -19,6 +19,7 @@ pub struct GatewayRuntimeState {
     config: RwLock<GatewayConfig>,
     cert_cache: RwLock<CertificateCache>,
     http01_store: Http01ChallengeStore,
+    tls_alpn_store: TlsAlpnChallengeStore,
     issuer: Arc<dyn AcmeIssuer>,
     issuance_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     config_version: AtomicU64,
@@ -52,6 +53,7 @@ impl GatewayRuntimeState {
             config: RwLock::new(config),
             cert_cache: RwLock::new(cert_cache),
             http01_store: Http01ChallengeStore::default(),
+            tls_alpn_store: TlsAlpnChallengeStore::default(),
             issuer,
             issuance_locks: std::sync::Mutex::new(HashMap::new()),
             config_version: AtomicU64::new(1),
@@ -149,6 +151,10 @@ impl GatewayRuntimeState {
 
     pub fn http01_store(&self) -> Http01ChallengeStore {
         self.http01_store.clone()
+    }
+
+    pub fn tls_alpn_challenge_for(&self, hostname: &str) -> Option<CertificateMaterial> {
+        self.tls_alpn_store.get_for_host(hostname)
     }
 
     pub fn reload_if_enabled(&self, now: SystemTime) -> Result<()> {
@@ -253,7 +259,7 @@ impl GatewayRuntimeState {
         METRICS.record_cert_issuance_attempt();
         let entry = match self
             .issuer
-            .issue_certificate(&config, &hostname, &self.http01_store)
+            .issue_certificate(&config, &hostname, &self.http01_store, &self.tls_alpn_store)
             .await
         {
             Ok(entry) => entry,

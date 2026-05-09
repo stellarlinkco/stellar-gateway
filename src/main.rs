@@ -3,13 +3,12 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use clap::Parser;
-use pingora::listeners::tls::TlsSettings;
 use pingora::prelude::{Opt, Server, http_proxy_service};
 use stellar_gateway::config::GatewayConfig;
 use stellar_gateway::error::Result;
 use stellar_gateway::proxy::GatewayProxy;
 use stellar_gateway::reload::GatewayRuntimeState;
-use stellar_gateway::tls::tls_accept_callbacks;
+use stellar_gateway::tls::tls_settings;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -45,8 +44,7 @@ fn main() -> Result<()> {
     );
     let http_bind = config.listeners.http.bind.to_string();
     let https_bind = config.listeners.https.bind.to_string();
-    let tls_settings =
-        TlsSettings::with_callbacks(tls_accept_callbacks(Arc::clone(&runtime_state)))?;
+    let tls_settings = tls_settings(Arc::clone(&runtime_state))?;
 
     install_reload_handler(Arc::clone(&runtime_state));
 
