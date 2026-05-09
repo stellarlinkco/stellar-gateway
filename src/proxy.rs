@@ -290,7 +290,12 @@ impl ProxyHttp for GatewayProxy {
         Self::CTX: Send + Sync,
     {
         if let Some(host) = ctx.original_host.as_deref() {
-            upstream_request.insert_header("Host", host)?;
+            let upstream_host = ctx
+                .selected_upstream
+                .as_ref()
+                .and_then(|upstream| upstream.host_header.as_deref())
+                .unwrap_or(host);
+            upstream_request.insert_header("Host", upstream_host)?;
             upstream_request.insert_header("X-Forwarded-Host", host)?;
         }
         Ok(())

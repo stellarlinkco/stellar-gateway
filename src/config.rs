@@ -68,6 +68,8 @@ pub struct UpstreamConfig {
     pub tls: bool,
     #[serde(default)]
     pub server_name: Option<String>,
+    #[serde(default)]
+    pub host_header: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,6 +265,16 @@ fn validate_upstream(path: &str, upstream: &UpstreamConfig) -> Result<()> {
         )));
     }
 
+    if let Some(host_header) = &upstream.host_header
+        && (host_header.trim().is_empty()
+            || host_header.contains('\r')
+            || host_header.contains('\n'))
+    {
+        return Err(GatewayError::Gatewayfile(format!(
+            "{path}.host_header must be a valid header value"
+        )));
+    }
+
     Ok(())
 }
 
@@ -352,7 +364,14 @@ fn parse_caddyfile_subset(contents: &str) -> Result<GatewayConfig> {
     };
 
     let mut upstream = None;
-    for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    let body_lines = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    while index < body_lines.len() {
+        let line = body_lines[index];
         let mut parts = line.split_whitespace();
         let directive = parts.next().unwrap_or_default();
         match directive {
@@ -365,12 +384,39 @@ fn parse_caddyfile_subset(contents: &str) -> Result<GatewayConfig> {
                 let target = parts.next().ok_or_else(|| {
                     GatewayError::Gatewayfile("reverse_proxy requires an upstream".to_owned())
                 })?;
-                if parts.next().is_some() {
-                    return Err(GatewayError::Gatewayfile(
-                        "reverse_proxy supports exactly one upstream in this subset".to_owned(),
-                    ));
+                let mut parsed_upstream = parse_reverse_proxy_upstream(target)?;
+                match (parts.next(), parts.next()) {
+                    (None, None) => {}
+                    (Some("{"), None) => {
+                        index += 1;
+                        let mut closed = false;
+                        while index < body_lines.len() {
+                            let option_line = body_lines[index];
+                            if option_line == "}" {
+                                closed = true;
+                                break;
+                            }
+                            apply_reverse_proxy_option(&mut parsed_upstream, option_line)?;
+                            index += 1;
+                        }
+                        if !closed {
+                            return Err(GatewayError::Gatewayfile(
+                                "reverse_proxy block must contain `}`".to_owned(),
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(GatewayError::Gatewayfile(
+                            "reverse_proxy supports exactly one upstream in this subset".to_owned(),
+                        ));
+                    }
                 }
-                upstream = Some(parse_reverse_proxy_upstream(target)?);
+                upstream = Some(parsed_upstream);
+            }
+            "}" => {
+                return Err(GatewayError::Gatewayfile(
+                    "unexpected Caddyfile block terminator".to_owned(),
+                ));
             }
             other => {
                 return Err(GatewayError::Gatewayfile(format!(
@@ -378,6 +424,7 @@ fn parse_caddyfile_subset(contents: &str) -> Result<GatewayConfig> {
                 )));
             }
         }
+        index += 1;
     }
 
     let upstream = upstream.ok_or_else(|| {
@@ -452,6 +499,20 @@ fn split_leading_caddy_block(contents: &str) -> Result<(&str, &str)> {
     ))
 }
 
+fn apply_reverse_proxy_option(upstream: &mut UpstreamConfig, line: &str) -> Result<()> {
+    let mut parts = line.split_whitespace();
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("header_up"), Some("Host"), Some(value), None) => {
+            upstream.host_header = Some(value.to_owned());
+            Ok(())
+        }
+        (Some(option), _, _, _) => Err(GatewayError::Gatewayfile(format!(
+            "unsupported reverse_proxy option `{option}`"
+        ))),
+        (None, _, _, _) => Ok(()),
+    }
+}
+
 fn parse_reverse_proxy_upstream(target: &str) -> Result<UpstreamConfig> {
     if target.trim().is_empty() {
         return Err(GatewayError::Gatewayfile(
@@ -464,6 +525,7 @@ fn parse_reverse_proxy_upstream(target: &str) -> Result<UpstreamConfig> {
             addr: addr.to_owned(),
             tls: false,
             server_name: None,
+            host_header: None,
         });
     }
 
@@ -473,6 +535,7 @@ fn parse_reverse_proxy_upstream(target: &str) -> Result<UpstreamConfig> {
             addr: addr.to_owned(),
             tls: true,
             server_name: server_name.map(str::to_owned),
+            host_header: None,
         });
     }
 
@@ -480,5 +543,6 @@ fn parse_reverse_proxy_upstream(target: &str) -> Result<UpstreamConfig> {
         addr: target.to_owned(),
         tls: false,
         server_name: None,
+        host_header: None,
     })
 }

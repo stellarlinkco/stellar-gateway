@@ -286,6 +286,86 @@ hdd.ink, *.hdd.ink {
 }
 
 #[test]
+fn gatewayfile_should_load_upstream_host_header_from_yaml() {
+    let config = GatewayConfig::load_from_str(
+        r#"
+listeners:
+  http:
+    bind: "0.0.0.0:8080"
+  https:
+    bind: "0.0.0.0:8443"
+
+routes:
+  wildcard:
+    suffix: "geo.stellarlink.co"
+    upstream:
+      addr: "127.0.0.1:18080"
+      tls: false
+      host_header: "127.0.0.1"
+
+tls:
+  ask_url: "http://127.0.0.1:9000/ask"
+
+acme:
+  directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory"
+  email: "admin@example.com"
+  http_01: true
+
+cert_cache:
+  dir: "./cert-cache"
+
+reload:
+  enabled: true
+
+logging:
+  level: "info"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.routes.wildcard.upstream.host_header.as_deref(),
+        Some("127.0.0.1")
+    );
+}
+
+#[test]
+fn gatewayfile_should_load_caddyfile_reverse_proxy_header_up_host() {
+    let config = GatewayConfig::load_from_str(
+        r#"
+geo.stellarlink.co, *.geo.stellarlink.co {
+	reverse_proxy 127.0.0.1:18080 {
+		header_up Host 127.0.0.1
+	}
+}
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(config.routes.wildcard.upstream.addr, "127.0.0.1:18080");
+    assert_eq!(
+        config.routes.wildcard.upstream.host_header.as_deref(),
+        Some("127.0.0.1")
+    );
+}
+
+#[test]
+fn gatewayfile_should_reject_caddyfile_unsupported_reverse_proxy_option() {
+    let err = GatewayConfig::load_from_str(
+        r#"
+geo.stellarlink.co, *.geo.stellarlink.co {
+	reverse_proxy 127.0.0.1:18080 {
+		header_up X-Test value
+	}
+}
+"#,
+    )
+    .unwrap_err();
+
+    assert!(err.to_string().contains("unsupported reverse_proxy option"));
+}
+
+#[test]
 fn gatewayfile_should_reject_caddyfile_unsupported_directive() {
     let err = GatewayConfig::load_from_str(
         r#"

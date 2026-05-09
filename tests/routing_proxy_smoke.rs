@@ -170,6 +170,29 @@ hdd.ink, *.hdd.ink {{
     )
 }
 
+fn write_caddyfile_gatewayfile_with_host_override(
+    dir: &TempDir,
+    http_port: u16,
+    upstream: SocketAddr,
+) -> std::path::PathBuf {
+    write_gatewayfile_contents(
+        dir,
+        format!(
+            r#"{{
+	http_port {http_port}
+	https_port 0
+}}
+
+geo.stellarlink.co, *.geo.stellarlink.co {{
+	reverse_proxy {upstream} {{
+		header_up Host 127.0.0.1
+	}}
+}}
+"#
+        ),
+    )
+}
+
 fn write_gatewayfile_contents(dir: &TempDir, contents: String) -> std::path::PathBuf {
     let gatewayfile_path = dir.path().join("Gatewayfile");
     std::fs::create_dir_all(dir.path().join("cert-cache")).expect("create cert-cache dir");
@@ -400,6 +423,32 @@ fn gateway_should_preserve_host_and_overwrite_forwarded_host() {
         status == 200
             && normalized_request.contains("\r\nhost: zhirang.hdd.ink\r\n")
             && normalized_request.contains("\r\nx-forwarded-host: zhirang.hdd.ink\r\n")
+            && !normalized_request.contains("attacker.example"),
+        "status={status}; upstream_request={upstream_request}"
+    );
+}
+
+#[test]
+fn gateway_should_apply_configured_upstream_host_override() {
+    let env = TestEnv::new_with_gatewayfile(write_caddyfile_gatewayfile_with_host_override);
+
+    let (status, _resp) = http_get_path_with_extra_headers(
+        env.gateway_port,
+        "geo.stellarlink.co",
+        "/",
+        &[("X-Forwarded-Host", "attacker.example")],
+    );
+    let upstream_request = env
+        .last_upstream_request
+        .lock()
+        .expect("lock last request")
+        .clone();
+    let normalized_request = upstream_request.to_ascii_lowercase();
+
+    assert!(
+        status == 200
+            && normalized_request.contains("\r\nhost: 127.0.0.1\r\n")
+            && normalized_request.contains("\r\nx-forwarded-host: geo.stellarlink.co\r\n")
             && !normalized_request.contains("attacker.example"),
         "status={status}; upstream_request={upstream_request}"
     );
