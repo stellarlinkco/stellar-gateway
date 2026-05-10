@@ -3,6 +3,7 @@ pub mod acme_issuer;
 pub mod cert_cache;
 pub mod config;
 pub mod error;
+pub mod gateway_plan;
 pub mod metrics;
 pub mod observability;
 pub mod proxy;

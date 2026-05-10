@@ -4,6 +4,7 @@ use stellar_gateway::cert_cache::{
     CacheEntryRejection, CertificateCache, CertificateCacheEntry, CertificateMaterial,
 };
 use stellar_gateway::config::GatewayConfig;
+use stellar_gateway::gateway_plan::HostMatcher;
 use stellar_gateway::reload::GatewayRuntimeState;
 
 fn valid_gatewayfile(cache_dir: &std::path::Path, suffix: &str) -> String {
@@ -261,11 +262,79 @@ fn gateway_runtime_state_should_apply_valid_config_reload() {
     std::fs::write(&gatewayfile, valid_gatewayfile(dir.path(), "page.hdd.ink")).unwrap();
     let config = GatewayConfig::load_from_path(&gatewayfile).unwrap();
     let state = GatewayRuntimeState::new(config, &gatewayfile, SystemTime::now()).unwrap();
+    let previous_plan = state.plan_snapshot();
     std::fs::write(&gatewayfile, valid_gatewayfile(dir.path(), "other.hdd.ink")).unwrap();
 
     state.reload_config().unwrap();
 
+    let reloaded_plan = state.plan_snapshot();
     assert_eq!(state.config().routes.wildcard.suffix, "other.hdd.ink");
+    assert!(
+        previous_plan
+            .select_route("demo.page.hdd.ink", "/")
+            .is_some()
+    );
+    assert!(
+        previous_plan
+            .select_route("demo.other.hdd.ink", "/")
+            .is_none()
+    );
+    assert!(
+        reloaded_plan
+            .select_route("demo.other.hdd.ink", "/")
+            .is_some()
+    );
+    assert_eq!(
+        reloaded_plan.sites()[0].hosts,
+        vec![HostMatcher::WildcardSuffix("other.hdd.ink".to_owned())]
+    );
+}
+
+#[test]
+fn gateway_runtime_state_should_reload_multisite_caddyfile_gateway_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let gatewayfile = dir.path().join("Gatewayfile");
+    std::fs::write(&gatewayfile, valid_gatewayfile(dir.path(), "page.hdd.ink")).unwrap();
+    let config = GatewayConfig::load_from_path(&gatewayfile).unwrap();
+    let state = GatewayRuntimeState::new(config, &gatewayfile, SystemTime::now()).unwrap();
+    std::fs::write(
+        &gatewayfile,
+        r#"
+one.example.test {
+    reverse_proxy 127.0.0.1:3000
+}
+
+api.example.test {
+    reverse_proxy /v1/* 127.0.0.1:3001
+    reverse_proxy 127.0.0.1:3002
+}
+"#,
+    )
+    .unwrap();
+
+    state.reload_config().unwrap();
+
+    let reloaded_plan = state.plan_snapshot();
+    assert!(
+        reloaded_plan
+            .select_route("one.example.test", "/")
+            .is_some()
+    );
+    assert!(
+        reloaded_plan
+            .select_route("api.example.test", "/v1/users")
+            .is_some()
+    );
+    assert!(
+        reloaded_plan
+            .select_route("api.example.test", "/other")
+            .is_some()
+    );
+    assert!(
+        reloaded_plan
+            .select_route("missing.example.test", "/")
+            .is_none()
+    );
 }
 
 #[test]

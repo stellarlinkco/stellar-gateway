@@ -3,11 +3,12 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use clap::Parser;
-use pingora::prelude::{Opt, Server, http_proxy_service};
-use stellar_gateway::config::GatewayConfig;
+use pingora::apps::HttpServerOptions;
+use pingora::prelude::{Opt, Server};
+use pingora::proxy::ProxyServiceBuilder;
 use stellar_gateway::error::Result;
 use stellar_gateway::proxy::GatewayProxy;
-use stellar_gateway::reload::GatewayRuntimeState;
+use stellar_gateway::reload::{GatewayRuntimeState, LoadedGatewayRuntime};
 use stellar_gateway::tls::tls_settings;
 use tracing_subscriber::EnvFilter;
 
@@ -21,7 +22,8 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = GatewayConfig::load_from_path(&cli.gatewayfile)?;
+    let loaded = LoadedGatewayRuntime::load_from_path(&cli.gatewayfile)?;
+    let config = loaded.config.clone();
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| config.logging.to_env_filter()),
@@ -29,8 +31,16 @@ fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let runtime_state = Arc::new(GatewayRuntimeState::new(
-        config.clone(),
+    if let Some(summary) = loaded.plan.startup_compatibility_summary() {
+        tracing::warn!(
+            event = "startup_compatibility_summary",
+            summary = %summary,
+            "startup compatibility summary"
+        );
+    }
+
+    let runtime_state = Arc::new(GatewayRuntimeState::new_loaded(
+        loaded,
         &cli.gatewayfile,
         SystemTime::now(),
     )?);
@@ -38,10 +48,14 @@ fn main() -> Result<()> {
     let mut server = Server::new(Some(Opt::default()))?;
     server.bootstrap();
 
-    let mut proxy = http_proxy_service(
+    let mut server_options = HttpServerOptions::default();
+    server_options.h2c = true;
+    let mut proxy = ProxyServiceBuilder::new(
         &server.configuration,
         GatewayProxy::from_runtime_state(Arc::clone(&runtime_state)),
-    );
+    )
+    .server_options(server_options)
+    .build();
     let http_bind = config.listeners.http.bind.to_string();
     let https_bind = config.listeners.https.bind.to_string();
     let tls_settings = tls_settings(Arc::clone(&runtime_state))?;

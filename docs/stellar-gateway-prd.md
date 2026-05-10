@@ -4,7 +4,85 @@
 **Date**: 2026-04-28
 **Author**: PRD Compiler
 **Quality Score**: 94/100
-**Status**: Final
+**Status**: Superseded as MVP baseline by the 2026-05-09 architecture direction below
+
+## 2026-05-09 Architecture Direction Update
+
+The product direction has expanded from the original single-upstream wildcard MVP into an **HTTP/gRPC Web Gateway**: Caddy-compatible configuration ergonomics, nginx-aligned performance goals, and broad web gateway functionality on top of Pingora.
+
+### Updated Product Principles
+
+- **Configuration aligns with Caddy**: Caddyfile compatibility is a first-class goal. Site blocks, matchers, handler semantics, directive ordering, snippets/imports, and placeholders should follow Caddy behavior where supported.
+- **Performance aligns with nginx**: Caddyfile compatibility must compile into an internal Gateway Plan so request handling executes a high-performance runtime model instead of interpreting raw config per request.
+- **Functionality is comprehensive but staged**: Prioritize static sites, HTTP reverse proxy, native gRPC reverse proxy, automatic HTTPS, upstream pools, health checks, caching, compression, security, and observability.
+
+### Updated Scope Boundaries
+
+- Build an HTTP/gRPC Web Gateway, not a full nginx clone.
+- Do not implement FastCGI, uWSGI, SCGI, PHP gateway behavior, mail proxying, or full nginx stream TCP/UDP parity.
+- Defer HTTP/3 until the Rust ecosystem provides mature libraries that can be integrated directly.
+- Native gRPC proxying means preserving HTTP/2 gRPC semantics, including streaming and trailers; it does not mean gRPC-Web or REST transcoding.
+
+### Updated Configuration Compatibility Rule
+
+Stellar Gateway should parse broad Caddyfile syntax for migration friendliness. Unsupported Caddyfile directives should warn clearly and appear in a startup compatibility summary instead of hard-failing startup by default. Security-sensitive unsupported behavior must mark config health as degraded, which affects readiness (`/ready`) but not process liveness (`/health`). See `docs/adr/0001-permissive-caddyfile-migration.md`.
+
+### Target Architecture Shape
+
+Runtime should not consume raw Gatewayfile/Caddyfile structures directly. Configuration adapters compile inputs into an immutable **Gateway Plan** containing Sites, Matchers, Handler Chains, Upstreams, and TLS policy. Pingora remains the outer adapter; routing, dispatch, static file serving, reverse proxying, TLS automation, reload, and observability should live behind gateway-owned modules.
+
+### Updated Roadmap
+
+#### v0.2 — Web Gateway MVP
+
+- New Gateway Plan IR.
+- Multi-site configuration.
+- Host/path matcher support.
+- Caddy-compatible handler semantics for supported directives.
+- `root` and `file_server` static serving.
+- HTTP `reverse_proxy`.
+- Native gRPC reverse proxy through `h2c://` and `grpcs://` upstreams.
+- WebSocket and SSE smoke tests.
+- Config validation, compatibility warnings, and startup summary.
+- `/health` for liveness and `/ready` for config readiness.
+
+#### v0.3 — Production Proxy
+
+- Upstream pools.
+- Load balancing.
+- Timeout policies.
+- Retry policies.
+- Active and passive health checks.
+- `header_up` and `header_down`.
+- Request body and header limits.
+- Better access logs.
+
+#### v0.4 — TLS & Multi-tenant
+
+- HTTP to HTTPS redirect.
+- Per-site TLS policy.
+- ACME issuer fallback.
+- DNS-01 interface.
+- Shared certificate storage abstraction.
+- On-demand TLS hardening.
+
+#### v0.5 — Performance & Cache
+
+- Static file performance path.
+- Range and precompressed asset support.
+- Proxy cache.
+- Compression.
+- Benchmark suite covering static files, HTTP proxy, native gRPC, TLS, cache, and reload under traffic.
+
+#### v0.6 — Security & Observability
+
+- Authentication.
+- Rate limiting.
+- IP policy.
+- OpenTelemetry.
+- Admin API.
+- Route explain/debug.
+
 
 ## Quick Reference (Agent Context)
 
